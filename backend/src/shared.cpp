@@ -70,3 +70,14 @@ void write_fixed(char* buf, int maxlen, const string& src) {
     if (to_copy > maxlen) to_copy = maxlen;
     memcpy(buf, src.c_str(), to_copy);
 }
+namespace {
+bool g_api_execution = false;
+}
+
+void set_api_execution(bool active) {
+    g_api_execution = active;
+}
+
+bool is_api_execution() {
+    return g_api_execution;
+}

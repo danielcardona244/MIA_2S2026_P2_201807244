@@ -21,6 +21,7 @@ extern vector<MountEntry> mounted_list;
 // comandos
 void cmd_mount(map<string, string>& params);
 void cmd_mounted();
+void cmd_unmount(map<string, string>& params);
 
 // utilidad para buscar particion montada por id
 bool get_mount_info(const string& id, string& out_path, string& out_name);

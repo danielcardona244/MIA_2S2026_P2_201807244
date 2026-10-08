@@ -38,6 +38,23 @@ export default function App() {
       return
     }
 
+    const containsFdiskDelete = commands
+      .split('\n')
+      .some((line) => {
+        const clean = line.trim()
+        return clean && !clean.startsWith('#') && /\bfdisk\b/i.test(clean) && /-delete\s*=/i.test(clean)
+      })
+
+    if (containsFdiskDelete) {
+      const confirmed = window.confirm(
+        'El script contiene FDISK -delete. Esta operacion puede eliminar una particion y sus datos. ¿Desea continuar?',
+      )
+      if (!confirmed) {
+        setStatus('Eliminacion cancelada por el usuario')
+        return
+      }
+    }
+
     setRunning(true)
     setStatus('Ejecutando...')
 
@@ -73,7 +90,7 @@ export default function App() {
     <main className="app-shell">
       <header className="hero">
         <div>
-          <span className="eyebrow">MIA · Proyecto 1</span>
+          <span className="eyebrow">MIA · Proyecto 2</span>
           <h1>ExtreamFS</h1>
           <p>Interfaz web para ejecutar comandos sobre el sistema de archivos EXT2.</p>
         </div>

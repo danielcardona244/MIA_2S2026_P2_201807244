@@ -1,5 +1,6 @@
 #include "api.h"
 #include "scanner.h"
+#include "shared.h"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -325,6 +326,7 @@ bool extract_commands(const string& body, string& commands, string& error) {
 string capture_command_output(const string& commands) {
     ostringstream captured;
     streambuf* previous = cout.rdbuf(captured.rdbuf());
+    set_api_execution(true);
 
     try {
         process_input(commands);
@@ -334,6 +336,7 @@ string capture_command_output(const string& commands) {
         cout << "[ERROR] API: excepcion desconocida al ejecutar comandos\n";
     }
 
+    set_api_execution(false);
     cout.rdbuf(previous);
     return captured.str();
 }

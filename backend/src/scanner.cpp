@@ -17,9 +17,10 @@ using namespace std;
 static const map<string, set<string>> allowed_params = {
     {"mkdisk",  {"size", "fit", "unit", "path"}},
     {"rmdisk",  {"path"}},
-    {"fdisk",   {"size", "unit", "path", "type", "fit", "name"}},
+    {"fdisk",   {"size", "unit", "path", "type", "fit", "name", "delete", "add"}},
     {"mount",   {"path", "name"}},
     {"mounted", {}},
+    {"unmount", {"id"}},
     {"mkfs",    {"id", "type"}},
     {"login",   {"user", "pass", "id"}},
     {"logout",  {}},
@@ -101,6 +102,7 @@ void process_line(const string& line) {
     string cmd = to_lower(tokens[0]);
 
     map<string, string> params;
+    string fdisk_mode; // primera operacion size/add/delete encontrada en FDISK
     for (int i = 1; i < (int)tokens.size(); i++) {
         if (tokens[i].empty() || tokens[i][0] != '-') {
             cout << "[ERROR] " << to_upper(cmd)
@@ -126,6 +128,11 @@ void process_line(const string& line) {
             cout << "[ERROR] " << to_upper(cmd)
                  << ": parametro -" << key << " repetido" << endl;
             return;
+        }
+
+        if (cmd == "fdisk" && fdisk_mode.empty() &&
+            (key == "size" || key == "add" || key == "delete")) {
+            fdisk_mode = key;
         }
         params[key] = value;
     }
@@ -166,6 +173,10 @@ void process_line(const string& line) {
         }
     }
 
+    if (cmd == "fdisk" && !fdisk_mode.empty()) {
+        params["__mode"] = fdisk_mode;
+    }
+
     if (cmd == "mkdisk") {
         cmd_mkdisk(params);
     } else if (cmd == "rmdisk") {
@@ -176,6 +187,8 @@ void process_line(const string& line) {
         cmd_mount(params);
     } else if (cmd == "mounted") {
         cmd_mounted();
+    } else if (cmd == "unmount") {
+        cmd_unmount(params);
     } else if (cmd == "mkfs") {
         cmd_mkfs(params);
     } else if (cmd == "login") {

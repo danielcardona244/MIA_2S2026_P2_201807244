@@ -66,12 +66,24 @@ rep -id=441A -path=/tmp/tree.jpg -name=tree
 ## Pruebas
 
 ```bash
+bash backend/tests/test_p2_sprint1.sh
 bash backend/tests/test_sprint6.sh
 bash backend/tests/test_sprint5.sh
 bash backend/tests/test_sprint4.sh
 bash backend/tests/test_sprint3.sh
 bash backend/tests/test_sprint2.sh
 ```
+
+
+## Proyecto 2 - Sprint 1
+
+Ya se incorporaron las primeras extensiones solicitadas para Proyecto 2:
+
+- `FDISK -delete=fast|full` para primarias, extendidas y lógicas.
+- `FDISK -add=<valor>` positivo o negativo, respetando espacio contiguo.
+- `UNMOUNT -id=<id>`, reiniciando el correlativo a `0`.
+- Confirmación de `FDISK -delete` en consola y confirmación previa desde el frontend.
+- Conservación de tamaños binarios de `MBR`, `Partition` y `EBR`.
 
 ## Documentación
 

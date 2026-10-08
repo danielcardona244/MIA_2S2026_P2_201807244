@@ -24,4 +24,8 @@ string read_fixed(const char* buf, int maxlen);
 // escribir string en campo char de tamano fijo, rellenando con ceros
 void write_fixed(char* buf, int maxlen, const string& src);
 
+// contexto de ejecucion: evita lecturas interactivas cuando un comando llega por API
+void set_api_execution(bool active);
+bool is_api_execution();
+
 #endif

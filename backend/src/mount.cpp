@@ -7,6 +7,7 @@
 #include <cstring>
 #include <algorithm>
 #include <ctime>
+#include <set>
 
 using namespace std;
 
@@ -28,7 +29,7 @@ static char get_disk_letter(const string& path) {
             return dl.letter;
         }
     }
-    // disco nuevo, asignar siguiente letra
+
     DiskLetter nuevo;
     nuevo.path = path;
     nuevo.letter = next_letter;
@@ -37,15 +38,52 @@ static char get_disk_letter(const string& path) {
     return nuevo.letter;
 }
 
-// contar cuantas particiones de un disco estan montadas
-static int count_mounted_for_disk(const string& path) {
-    int count = 0;
-    for (auto& m : mounted_list) {
-        if (m.path == path) {
-            count++;
-        }
+// Obtener el primer correlativo libre del disco. Esto evita IDs duplicados si
+// se desmonta una particion intermedia y luego se vuelve a montar otra.
+static int next_correlative_for_disk(const string& path) {
+    set<int> used;
+    for (const auto& m : mounted_list) {
+        if (m.path != path || m.id.size() != 4) continue;
+        char digit = m.id[2];
+        if (digit >= '1' && digit <= '9') used.insert(digit - '0');
     }
-    return count;
+
+    for (int i = 1; i <= 9; ++i) {
+        if (!used.count(i)) return i;
+    }
+    return -1;
+}
+
+static int find_primary_index(const MBR& mbr, const string& name) {
+    for (int i = 0; i < 4; i++) {
+        const Partition& p = mbr.mbr_partitions[i];
+        if (p.part_s <= 0 || p.part_start == -1 || p.part_type != 'P') continue;
+        if (compare_ci(read_fixed(p.part_name, 16), name)) return i;
+    }
+    return -1;
+}
+
+static void update_superblock_mount_time(const string& path,
+                                         const Partition& part,
+                                         bool mounting) {
+    FILE* fs_file = fopen(path.c_str(), "r+b");
+    if (fs_file == NULL) return;
+
+    Superblock sb{};
+    fseek(fs_file, part.part_start, SEEK_SET);
+    if (fread(&sb, sizeof(Superblock), 1, fs_file) == 1 &&
+        sb.s_magic == 0xEF53 &&
+        (sb.s_filesystem_type == 2 || sb.s_filesystem_type == 3)) {
+        if (mounting) {
+            sb.s_mtime = time(nullptr);
+            sb.s_mnt_count++;
+        } else {
+            sb.s_umtime = time(nullptr);
+        }
+        fseek(fs_file, part.part_start, SEEK_SET);
+        fwrite(&sb, sizeof(Superblock), 1, fs_file);
+    }
+    fclose(fs_file);
 }
 
 void cmd_mount(map<string, string>& params) {
@@ -61,7 +99,6 @@ void cmd_mount(map<string, string>& params) {
     string path = params["path"];
     string name = params["name"];
 
-    // verificar que el disco exista
     FILE* check = fopen(path.c_str(), "rb");
     if (check == NULL) {
         cout << "[ERROR] MOUNT: el disco no existe en " << path << endl;
@@ -69,27 +106,14 @@ void cmd_mount(map<string, string>& params) {
     }
     fclose(check);
 
-    // leer MBR
     MBR mbr = read_mbr(path);
-
-    // buscar la particion por nombre (solo primarias)
-    int part_idx = -1;
-    for (int i = 0; i < 4; i++) {
-        if (mbr.mbr_partitions[i].part_s > 0) {
-            string existing = read_fixed(mbr.mbr_partitions[i].part_name, 16);
-            if (mbr.mbr_partitions[i].part_type == 'P' && compare_ci(existing, name)) {
-                part_idx = i;
-                break;
-            }
-        }
-    }
+    int part_idx = find_primary_index(mbr, name);
 
     if (part_idx == -1) {
         cout << "[ERROR] MOUNT: no se encontro particion primaria con nombre " << name << endl;
         return;
     }
 
-    // verificar que no este ya montada
     for (auto& m : mounted_list) {
         if (m.path == path && compare_ci(m.name, name)) {
             cout << "[ERROR] MOUNT: la particion " << name
@@ -98,47 +122,28 @@ void cmd_mount(map<string, string>& params) {
         }
     }
 
-    // generar ID: ultimos 2 digitos carnet(44) + num_particion + letra_disco
     char letter = get_disk_letter(path);
-    int part_num = count_mounted_for_disk(path) + 1;
+    int part_num = next_correlative_for_disk(path);
+    if (part_num == -1) {
+        cout << "[ERROR] MOUNT: no hay correlativos disponibles para este disco" << endl;
+        return;
+    }
 
-    // carnet: 201807244, ultimos 2 digitos: 44
+    // carnet 201807244 -> ultimos dos digitos 44
     string id = "44" + to_string(part_num) + string(1, letter);
-
-    // validar que el id tenga exactamente 4 caracteres (cabe en part_id[4])
     if ((int)id.size() != 4) {
         cout << "[ERROR] MOUNT: error generando id de montaje" << endl;
         return;
     }
 
-    // actualizar la particion en el disco
-    mbr.mbr_partitions[part_idx].part_status = '1';
-    mbr.mbr_partitions[part_idx].part_correlative = part_num;
-    // copia segura de exactamente 4 bytes
-    memcpy(mbr.mbr_partitions[part_idx].part_id, id.c_str(), 4);
-
+    Partition& part = mbr.mbr_partitions[part_idx];
+    part.part_status = '1';
+    part.part_correlative = part_num;
+    memcpy(part.part_id, id.c_str(), 4);
     write_mbr(path, mbr);
 
-    // Si la particion ya estaba formateada como EXT2, actualizar la informacion
-    // de montaje del superbloque. En un primer montaje previo a MKFS estos bytes
-    // aun no representan un superbloque valido y simplemente se omiten.
-    {
-        FILE* fs_file = fopen(path.c_str(), "r+b");
-        if (fs_file != NULL) {
-            Superblock sb;
-            fseek(fs_file, mbr.mbr_partitions[part_idx].part_start, SEEK_SET);
-            if (fread(&sb, sizeof(Superblock), 1, fs_file) == 1 &&
-                sb.s_magic == 0xEF53 && sb.s_filesystem_type == 2) {
-                sb.s_mtime = time(nullptr);
-                sb.s_mnt_count++;
-                fseek(fs_file, mbr.mbr_partitions[part_idx].part_start, SEEK_SET);
-                fwrite(&sb, sizeof(Superblock), 1, fs_file);
-            }
-            fclose(fs_file);
-        }
-    }
+    update_superblock_mount_time(path, part, true);
 
-    // agregar a la tabla de montajes en RAM
     MountEntry entry;
     entry.id = id;
     entry.path = path;
@@ -146,6 +151,50 @@ void cmd_mount(map<string, string>& params) {
     mounted_list.push_back(entry);
 
     cout << "[OK] MOUNT: particion " << name << " montada con id=" << id << endl;
+}
+
+void cmd_unmount(map<string, string>& params) {
+    if (params.find("id") == params.end()) {
+        cout << "[ERROR] UNMOUNT: falta parametro -id" << endl;
+        return;
+    }
+
+    string id = params["id"];
+    if (id.empty()) {
+        cout << "[ERROR] UNMOUNT: id no puede estar vacio" << endl;
+        return;
+    }
+
+    auto it = find_if(mounted_list.begin(), mounted_list.end(), [&](const MountEntry& m) {
+        return compare_ci(m.id, id);
+    });
+
+    if (it == mounted_list.end()) {
+        cout << "[ERROR] UNMOUNT: no existe una particion montada con id=" << id << endl;
+        return;
+    }
+
+    MountEntry entry = *it;
+    MBR mbr = read_mbr(entry.path);
+    int part_idx = find_primary_index(mbr, entry.name);
+
+    if (part_idx == -1) {
+        cout << "[ERROR] UNMOUNT: la particion asociada al id ya no existe en el disco" << endl;
+        return;
+    }
+
+    Partition& part = mbr.mbr_partitions[part_idx];
+    update_superblock_mount_time(entry.path, part, false);
+
+    part.part_status = '0';
+    part.part_correlative = 0; // estado inicial exigido por Proyecto 2
+    memset(part.part_id, 0, sizeof(part.part_id));
+    write_mbr(entry.path, mbr);
+
+    mounted_list.erase(it);
+
+    cout << "[OK] UNMOUNT: particion " << entry.name
+         << " desmontada (id=" << entry.id << ")" << endl;
 }
 
 void cmd_mounted() {
