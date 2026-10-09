@@ -1506,6 +1506,295 @@ bool recurse_inode_tree(FILE* file,
     return visit(start_index);
 }
 
+struct DirectoryEntryRef {
+    int block_index = -1;
+    int slot = -1;
+    string name;
+    int inode_index = -1;
+};
+
+bool list_directory_entries(FILE* file,
+                            const Superblock& sb,
+                            const Inode& directory,
+                            vector<DirectoryEntryRef>& entries,
+                            string& error) {
+    entries.clear();
+    if (directory.i_type != '0') {
+        error = "el objeto no es una carpeta";
+        return false;
+    }
+
+    vector<int> blocks;
+    if (!inode_data_blocks(file, sb, directory, blocks, error)) return false;
+    for (int block_index : blocks) {
+        FolderBlock folder{};
+        if (!read_folder_block(file, sb, block_index, folder)) {
+            error = "no se pudo leer un bloque de carpeta";
+            return false;
+        }
+        for (int slot = 0; slot < 4; ++slot) {
+            const Content& entry = folder.b_content[slot];
+            if (entry.b_inodo < 0) continue;
+            string name = read_fixed(entry.b_name, 12);
+            if (name == "." || name == "..") continue;
+            entries.push_back({block_index, slot, name, entry.b_inodo});
+        }
+    }
+    return true;
+}
+
+bool clear_directory_entry(FILE* file,
+                           const Superblock& sb,
+                           int parent_index,
+                           Inode& parent,
+                           const string& name,
+                           int expected_inode,
+                           string& error) {
+    vector<int> blocks;
+    if (!inode_data_blocks(file, sb, parent, blocks, error)) return false;
+
+    for (int block_index : blocks) {
+        FolderBlock folder{};
+        if (!read_folder_block(file, sb, block_index, folder)) {
+            error = "no se pudo leer un bloque de carpeta padre";
+            return false;
+        }
+        for (Content& entry : folder.b_content) {
+            if (entry.b_inodo < 0) continue;
+            if (read_fixed(entry.b_name, 12) != name) continue;
+            if (expected_inode >= 0 && entry.b_inodo != expected_inode) continue;
+            entry = Content();
+            if (!write_folder_block(file, sb, block_index, folder)) {
+                error = "no se pudo quitar la referencia de la carpeta padre";
+                return false;
+            }
+            parent.i_mtime = time(nullptr);
+            if (!write_inode(file, sb, parent_index, parent)) {
+                error = "no se pudo actualizar el inodo de la carpeta padre";
+                return false;
+            }
+            return true;
+        }
+    }
+
+    error = "no se encontro la referencia dentro de la carpeta padre";
+    return false;
+}
+
+bool rename_directory_entry(FILE* file,
+                            const Superblock& sb,
+                            int parent_index,
+                            Inode& parent,
+                            const string& old_name,
+                            const string& new_name,
+                            int expected_inode,
+                            string& error) {
+    vector<int> blocks;
+    if (!inode_data_blocks(file, sb, parent, blocks, error)) return false;
+
+    for (int block_index : blocks) {
+        FolderBlock folder{};
+        if (!read_folder_block(file, sb, block_index, folder)) {
+            error = "no se pudo leer un bloque de carpeta padre";
+            return false;
+        }
+        for (Content& entry : folder.b_content) {
+            if (entry.b_inodo < 0) continue;
+            if (read_fixed(entry.b_name, 12) != old_name) continue;
+            if (expected_inode >= 0 && entry.b_inodo != expected_inode) continue;
+            write_fixed(entry.b_name, 12, new_name);
+            if (!write_folder_block(file, sb, block_index, folder)) {
+                error = "no se pudo actualizar el nombre en la carpeta padre";
+                return false;
+            }
+            parent.i_mtime = time(nullptr);
+            if (!write_inode(file, sb, parent_index, parent)) {
+                error = "no se pudo actualizar el inodo de la carpeta padre";
+                return false;
+            }
+            return true;
+        }
+    }
+
+    error = "no se encontro la referencia dentro de la carpeta padre";
+    return false;
+}
+
+void refresh_first_free_positions(FILE* file, Superblock& sb) {
+    int first_inode = first_free_bitmap(file, sb.s_bm_inode_start, sb.s_inodes_count);
+    int first_block = first_free_bitmap(file, sb.s_bm_block_start, sb.s_blocks_count);
+    sb.s_firts_ino = first_inode >= 0
+        ? sb.s_inode_start + first_inode * static_cast<int>(sizeof(Inode))
+        : -1;
+    sb.s_first_blo = first_block >= 0
+        ? sb.s_block_start + first_block * BLOCK_SIZE
+        : -1;
+}
+
+bool free_inode_storage(FILE* file,
+                        int partition_start,
+                        Superblock& sb,
+                        int inode_index,
+                        const Inode& inode,
+                        string& error) {
+    vector<int> data_blocks, pointer_blocks;
+    if (!collect_inode_blocks(file, sb, inode, data_blocks, pointer_blocks, error)) return false;
+
+    set<int> blocks_to_free;
+    blocks_to_free.insert(data_blocks.begin(), data_blocks.end());
+    blocks_to_free.insert(pointer_blocks.begin(), pointer_blocks.end());
+    char zeros[BLOCK_SIZE] = {0};
+    for (int block : blocks_to_free) {
+        if (!valid_block(sb, block)) {
+            error = "se intento liberar un bloque fuera de rango";
+            return false;
+        }
+        if (!write_exact(file,
+                         static_cast<long long>(sb.s_block_start) +
+                             static_cast<long long>(block) * BLOCK_SIZE,
+                         zeros,
+                         sizeof(zeros))) {
+            error = "no se pudo limpiar un bloque liberado";
+            return false;
+        }
+        if (!mark_free_without_rescan(file, sb, block)) {
+            error = "no se pudo liberar un bloque del bitmap";
+            return false;
+        }
+    }
+
+    if (inode_index < 0 || inode_index >= sb.s_inodes_count) {
+        error = "inodo fuera de rango";
+        return false;
+    }
+    char inode_bit = 0;
+    long long bitmap_pos = static_cast<long long>(sb.s_bm_inode_start) + inode_index;
+    if (!read_exact(file, bitmap_pos, &inode_bit, 1)) {
+        error = "no se pudo leer el bitmap de inodos";
+        return false;
+    }
+    if (inode_bit == '1') {
+        if (!set_bitmap(file, sb.s_bm_inode_start, sb.s_inodes_count, inode_index, '0')) {
+            error = "no se pudo liberar el inodo en el bitmap";
+            return false;
+        }
+        sb.s_free_inodes_count++;
+    }
+
+    vector<char> inode_zeros(sizeof(Inode), 0);
+    if (!write_exact(file,
+                     static_cast<long long>(sb.s_inode_start) +
+                         static_cast<long long>(inode_index) * sizeof(Inode),
+                     inode_zeros.data(), inode_zeros.size())) {
+        error = "no se pudo limpiar el inodo liberado";
+        return false;
+    }
+
+    refresh_first_free_positions(file, sb);
+    if (!write_superblock(file, partition_start, sb)) {
+        error = "no se pudo actualizar el superbloque";
+        return false;
+    }
+    return true;
+}
+
+struct RemoveResult {
+    bool deleted = false;
+    bool changed = false;
+    bool blocked_by_permissions = false;
+};
+
+bool remove_child_recursive(FILE* file,
+                            int partition_start,
+                            Superblock& sb,
+                            int parent_index,
+                            Inode& parent,
+                            const string& name,
+                            int inode_index,
+                            RemoveResult& result,
+                            string& error,
+                            set<int>& visiting) {
+    result = RemoveResult();
+    if (visiting.count(inode_index)) {
+        error = "se detecto una referencia ciclica inesperada";
+        return false;
+    }
+
+    Inode inode{};
+    if (!read_inode(file, sb, inode_index, inode)) {
+        error = "no se pudo leer el inodo a eliminar";
+        return false;
+    }
+    if (!has_permission(inode, 2)) {
+        result.blocked_by_permissions = true;
+        return true;
+    }
+
+    visiting.insert(inode_index);
+    if (inode.i_type == '0') {
+        vector<DirectoryEntryRef> children;
+        if (!list_directory_entries(file, sb, inode, children, error)) {
+            visiting.erase(inode_index);
+            return false;
+        }
+
+        for (const DirectoryEntryRef& child : children) {
+            RemoveResult child_result;
+            if (!remove_child_recursive(file, partition_start, sb,
+                                        inode_index, inode,
+                                        child.name, child.inode_index,
+                                        child_result, error, visiting)) {
+                visiting.erase(inode_index);
+                return false;
+            }
+            result.changed = result.changed || child_result.changed;
+            if (!child_result.deleted) {
+                result.blocked_by_permissions = result.blocked_by_permissions ||
+                                                child_result.blocked_by_permissions;
+            }
+        }
+
+        vector<DirectoryEntryRef> remaining;
+        if (!list_directory_entries(file, sb, inode, remaining, error)) {
+            visiting.erase(inode_index);
+            return false;
+        }
+        if (!remaining.empty()) {
+            result.blocked_by_permissions = true;
+            visiting.erase(inode_index);
+            return true;
+        }
+    }
+
+    visiting.erase(inode_index);
+    if (!clear_directory_entry(file, sb, parent_index, parent, name, inode_index, error)) return false;
+    if (!free_inode_storage(file, partition_start, sb, inode_index, inode, error)) return false;
+
+    result.deleted = true;
+    result.changed = true;
+    return true;
+}
+
+bool valid_rename_name(const string& name, string& error) {
+    if (name.empty()) {
+        error = "-name no puede estar vacio";
+        return false;
+    }
+    if (name == "." || name == "..") {
+        error = "-name no puede ser . ni ..";
+        return false;
+    }
+    if (name.find('/') != string::npos) {
+        error = "-name no debe contener /";
+        return false;
+    }
+    if (name.size() > 12) {
+        error = "-name admite maximo 12 caracteres";
+        return false;
+    }
+    return true;
+}
+
 bool parse_ugo(const string& text, char out[3]) {
     if (text.size() != 3) return false;
     for (int i = 0; i < 3; ++i) {
@@ -1898,4 +2187,203 @@ void cmd_chown(map<string, string>& params) {
     string journal_error;
     if (!fs_append_journal(current_session.id, "chown", pit->second, uit->second, journal_error))
         cout << "[WARN] CHOWN: " << journal_error << endl;
+}
+
+void cmd_remove(map<string, string>& params) {
+    if (!require_fs_session("REMOVE")) return;
+    auto pit = params.find("path");
+    if (pit == params.end() || pit->second.empty()) {
+        cout << "[ERROR] REMOVE: falta parametro -path" << endl;
+        return;
+    }
+
+    vector<string> parts;
+    string error;
+    if (!parse_absolute_path(pit->second, parts, error)) {
+        cout << "[ERROR] REMOVE: " << error << endl;
+        return;
+    }
+    if (parts.empty()) {
+        cout << "[ERROR] REMOVE: no se puede eliminar la carpeta raiz /" << endl;
+        return;
+    }
+
+    string disk_path;
+    Partition part;
+    Superblock sb;
+    if (!fs_load_context(current_session.id, disk_path, part, sb, error)) {
+        cout << "[ERROR] REMOVE: " << error << endl;
+        return;
+    }
+
+    FILE* file = fopen(disk_path.c_str(), "r+b");
+    if (!file) {
+        cout << "[ERROR] REMOVE: no se pudo abrir el disco" << endl;
+        return;
+    }
+
+    string leaf = parts.back();
+    parts.pop_back();
+    int parent_index = -1;
+    Inode parent{};
+    if (!ensure_parent_directory(file, part.part_start, sb, parts, false,
+                                 parent_index, parent, error)) {
+        fclose(file);
+        cout << "[ERROR] REMOVE: " << error << endl;
+        return;
+    }
+
+    int target_index = -1;
+    if (!find_child(file, sb, parent, leaf, target_index, error)) {
+        fclose(file);
+        cout << "[ERROR] REMOVE: " << error << endl;
+        return;
+    }
+    if (target_index < 0) {
+        fclose(file);
+        cout << "[ERROR] REMOVE: no existe el archivo o carpeta indicado" << endl;
+        return;
+    }
+
+    RemoveResult result;
+    set<int> visiting;
+    bool ok = remove_child_recursive(file, part.part_start, sb,
+                                     parent_index, parent,
+                                     leaf, target_index,
+                                     result, error, visiting);
+    fflush(file);
+    fclose(file);
+    if (!ok) {
+        cout << "[ERROR] REMOVE: " << error << endl;
+        return;
+    }
+
+    if (result.deleted) {
+        cout << "[OK] REMOVE: eliminado " << pit->second << endl;
+        string journal_error;
+        if (!fs_append_journal(current_session.id, "remove", pit->second, "complete", journal_error))
+            cout << "[WARN] REMOVE: " << journal_error << endl;
+        return;
+    }
+
+    if (result.changed) {
+        cout << "[ERROR] REMOVE: no se pudo eliminar completamente " << pit->second
+             << "; se conservaron elementos sin permiso de escritura" << endl;
+        string journal_error;
+        if (!fs_append_journal(current_session.id, "remove", pit->second, "partial", journal_error))
+            cout << "[WARN] REMOVE: " << journal_error << endl;
+    } else if (result.blocked_by_permissions) {
+        cout << "[ERROR] REMOVE: no tiene permiso de escritura sobre " << pit->second << endl;
+    } else {
+        cout << "[ERROR] REMOVE: no se pudo eliminar " << pit->second << endl;
+    }
+}
+
+void cmd_rename(map<string, string>& params) {
+    if (!require_fs_session("RENAME")) return;
+    auto pit = params.find("path");
+    auto nit = params.find("name");
+    if (pit == params.end() || nit == params.end()) {
+        cout << "[ERROR] RENAME: requiere -path y -name" << endl;
+        return;
+    }
+
+    string error;
+    if (!valid_rename_name(nit->second, error)) {
+        cout << "[ERROR] RENAME: " << error << endl;
+        return;
+    }
+
+    vector<string> parts;
+    if (!parse_absolute_path(pit->second, parts, error)) {
+        cout << "[ERROR] RENAME: " << error << endl;
+        return;
+    }
+    if (parts.empty()) {
+        cout << "[ERROR] RENAME: no se puede renombrar la carpeta raiz /" << endl;
+        return;
+    }
+
+    string disk_path;
+    Partition part;
+    Superblock sb;
+    if (!fs_load_context(current_session.id, disk_path, part, sb, error)) {
+        cout << "[ERROR] RENAME: " << error << endl;
+        return;
+    }
+
+    FILE* file = fopen(disk_path.c_str(), "r+b");
+    if (!file) {
+        cout << "[ERROR] RENAME: no se pudo abrir el disco" << endl;
+        return;
+    }
+
+    string old_name = parts.back();
+    parts.pop_back();
+    int parent_index = -1;
+    Inode parent{};
+    if (!ensure_parent_directory(file, part.part_start, sb, parts, false,
+                                 parent_index, parent, error)) {
+        fclose(file);
+        cout << "[ERROR] RENAME: " << error << endl;
+        return;
+    }
+
+    int target_index = -1;
+    if (!find_child(file, sb, parent, old_name, target_index, error)) {
+        fclose(file);
+        cout << "[ERROR] RENAME: " << error << endl;
+        return;
+    }
+    if (target_index < 0) {
+        fclose(file);
+        cout << "[ERROR] RENAME: no existe el archivo o carpeta indicado" << endl;
+        return;
+    }
+
+    Inode target{};
+    if (!read_inode(file, sb, target_index, target)) {
+        fclose(file);
+        cout << "[ERROR] RENAME: no se pudo leer el inodo objetivo" << endl;
+        return;
+    }
+    if (!has_permission(target, 2)) {
+        fclose(file);
+        cout << "[ERROR] RENAME: no tiene permiso de escritura sobre " << pit->second << endl;
+        return;
+    }
+
+    int duplicate = -1;
+    if (!find_child(file, sb, parent, nit->second, duplicate, error)) {
+        fclose(file);
+        cout << "[ERROR] RENAME: " << error << endl;
+        return;
+    }
+    if (duplicate >= 0) {
+        fclose(file);
+        cout << "[ERROR] RENAME: ya existe un archivo o carpeta con el nombre "
+             << nit->second << endl;
+        return;
+    }
+
+    if (!rename_directory_entry(file, sb, parent_index, parent,
+                                old_name, nit->second, target_index, error)) {
+        fclose(file);
+        cout << "[ERROR] RENAME: " << error << endl;
+        return;
+    }
+    target.i_mtime = time(nullptr);
+    if (!write_inode(file, sb, target_index, target)) {
+        fclose(file);
+        cout << "[ERROR] RENAME: no se pudo actualizar el inodo objetivo" << endl;
+        return;
+    }
+
+    fflush(file);
+    fclose(file);
+
+    cout << "[OK] RENAME: " << pit->second << " renombrado a " << nit->second << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "rename", pit->second, nit->second, journal_error))
+        cout << "[WARN] RENAME: " << journal_error << endl;
 }

@@ -1,12 +1,12 @@
 # ExtreamFS - Proyecto 2 MIA 2S2026
 
-Simulador educativo de un sistema de archivos **EXT2** sobre archivos binarios `.mia`, con backend en **C++17**, frontend en **React + Vite**, API REST local y reportes generados con **Graphviz**.
+Simulador educativo de sistemas de archivos **EXT2/EXT3** sobre archivos binarios `.mia`, con backend en **C++17**, frontend en **React + Vite**, API REST local y reportes generados con **Graphviz**.
 
 ## Arquitectura
 
 - **Frontend:** React/Vite. Entrada de comandos, salida, carga de scripts `.smia`.
 - **API REST:** `GET /api/health` y `POST /api/execute`.
-- **Backend C++:** parser de comandos, discos/particiones, montajes, EXT2, usuarios, archivos/permisos y reportes.
+- **Backend C++:** parser de comandos, discos/particiones, montajes, EXT2/EXT3, journaling, usuarios, archivos/permisos y reportes.
 - **Persistencia:** archivos `.mia` de tamaño fijo con MBR, EBR, superbloque, bitmaps, inodos y bloques.
 - **Reportes Graphviz:** MBR, DISK, INODE, BLOCK, bm_inode, bm_block, TREE, SB, FILE y LS.
 
@@ -67,6 +67,8 @@ rep -id=441A -path=/tmp/tree.jpg -name=tree
 
 ```bash
 bash backend/tests/test_p2_sprint1.sh
+bash backend/tests/test_p2_sprint2.sh
+bash backend/tests/test_p2_sprint3.sh
 bash backend/tests/test_sprint6.sh
 bash backend/tests/test_sprint5.sh
 bash backend/tests/test_sprint4.sh
@@ -110,3 +112,17 @@ las estructuras `Journal` e `Information` definidas en el enunciado. El comando
 `journaling -id=<id>` muestra las transacciones almacenadas sin generar un reporte Graphviz.
 Los comandos de mutación existentes (MKDIR, MKFILE, MKGRP, RMGRP, MKUSR, RMUSR,
 CHGRP, CHMOD y CHOWN) escriben journal cuando la partición utiliza EXT3.
+
+## Proyecto 2 - Sprint 3
+
+Se incorporaron los comandos solicitados para administrar eliminaciones y nombres:
+
+- `REMOVE -path=<ruta>` elimina archivos y carpetas recursivamente liberando inodos,
+  bloques de datos y bloques apuntadores. Respeta el permiso de escritura; si dentro de
+  una carpeta hay elementos no eliminables, conserva esos elementos y sus carpetas padre,
+  manteniendo las eliminaciones de los hijos que sí tenían permiso, como muestra el ejemplo
+  del enunciado.
+- `RENAME -path=<ruta> -name=<nuevo_nombre>` cambia únicamente la entrada de nombre en
+  la carpeta padre, conserva el inodo y el contenido, valida duplicados y permisos de escritura.
+- En EXT3, ambas operaciones se registran en el journaling.
+- Se protegen la carpeta raíz, nombres inválidos y rutas inexistentes.

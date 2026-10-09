@@ -17,6 +17,8 @@ void cmd_mkdir(map<string, string>& params);
 void cmd_cat(map<string, string>& params);
 void cmd_chmod(map<string, string>& params);
 void cmd_chown(map<string, string>& params);
+void cmd_remove(map<string, string>& params);
+void cmd_rename(map<string, string>& params);
 
 // Utilidades del sistema de archivos usadas por los comandos de usuarios.
 // Todas trabajan sobre una particion previamente montada por id.

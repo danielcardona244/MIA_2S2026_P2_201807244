@@ -34,6 +34,8 @@ static const map<string, set<string>> allowed_params = {
     {"mkdir",   {"path", "p"}},
     {"chmod",   {"path", "ugo", "r"}},
     {"chown",   {"path", "user", "r"}},
+    {"remove",  {"path"}},
+    {"rename",  {"path", "name"}},
     {"rep",     {"name", "path", "id", "path_file_ls"}},
 };
 
@@ -218,6 +220,10 @@ void process_line(const string& line) {
         cmd_chmod(params);
     } else if (cmd == "chown") {
         cmd_chown(params);
+    } else if (cmd == "remove") {
+        cmd_remove(params);
+    } else if (cmd == "rename") {
+        cmd_rename(params);
     } else if (cmd == "rep") {
         cmd_rep(params);
     } else if (cmd == "exit") {
