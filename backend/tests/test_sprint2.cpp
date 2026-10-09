@@ -175,6 +175,73 @@ static void users(const string& path, const string& name) {
     fclose(f);
 }
 
+static long long count_nonzero(FILE* f, long long start, long long size) {
+    if (start < 0 || size < 0) return -1;
+    if (fseek(f, static_cast<long>(start), SEEK_SET) != 0) return -1;
+    unsigned char buffer[4096];
+    long long remaining = size;
+    long long count = 0;
+    while (remaining > 0) {
+        size_t chunk = static_cast<size_t>(min<long long>(remaining, sizeof(buffer)));
+        size_t got = fread(buffer, 1, chunk, f);
+        if (got != chunk) return -1;
+        for (size_t i = 0; i < got; ++i) if (buffer[i] != 0) ++count;
+        remaining -= static_cast<long long>(got);
+    }
+    return count;
+}
+
+static void loss_inspect(const string& path, const string& name) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) { cout << "ERROR=open" << endl; return; }
+
+    Partition p;
+    if (!find_partition(f, name, p)) {
+        cout << "ERROR=partition" << endl;
+        fclose(f);
+        return;
+    }
+
+    Superblock sb{};
+    fseek(f, p.part_start, SEEK_SET);
+    if (fread(&sb, sizeof(Superblock), 1, f) != 1) {
+        cout << "ERROR=superblock" << endl;
+        fclose(f);
+        return;
+    }
+
+    cout << "fs_type=" << sb.s_filesystem_type << '\n';
+    cout << "magic=" << sb.s_magic << '\n';
+    cout << "inode_bitmap_nonzero="
+         << count_nonzero(f, sb.s_bm_inode_start, sb.s_inodes_count) << '\n';
+    cout << "block_bitmap_nonzero="
+         << count_nonzero(f, sb.s_bm_block_start, sb.s_blocks_count) << '\n';
+    cout << "inode_area_nonzero="
+         << count_nonzero(f, sb.s_inode_start,
+                          static_cast<long long>(sb.s_inodes_count) * sizeof(Inode)) << '\n';
+    cout << "block_area_nonzero="
+         << count_nonzero(f, sb.s_block_start,
+                          static_cast<long long>(sb.s_blocks_count) * sizeof(FileBlock)) << '\n';
+
+    long long journal_start = static_cast<long long>(p.part_start) + sizeof(Superblock);
+    long long journal_bytes = static_cast<long long>(sb.s_bm_inode_start) - journal_start;
+    int capacity = (journal_bytes > 0 && journal_bytes % static_cast<long long>(sizeof(Journal)) == 0)
+        ? static_cast<int>(journal_bytes / static_cast<long long>(sizeof(Journal))) : 0;
+    int journal_count = 0;
+    string last_operation;
+    for (int i = 0; i < capacity; ++i) {
+        Journal entry{};
+        fseek(f, static_cast<long>(journal_start + static_cast<long long>(i) * sizeof(Journal)), SEEK_SET);
+        if (fread(&entry, sizeof(Journal), 1, f) != 1) break;
+        if (entry.j_count <= 0) continue;
+        ++journal_count;
+        last_operation = fixed_name(entry.j_content.i_operation, 10);
+    }
+    cout << "journal_count=" << journal_count << '\n';
+    cout << "last_journal_operation=" << last_operation << '\n';
+    fclose(f);
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) return 1;
     string cmd = argv[1];
@@ -185,9 +252,10 @@ int main(int argc, char** argv) {
         cout << "JOURNAL=" << sizeof(Journal) << '\n';
         return 0;
     }
-    if ((cmd == "inspect" || cmd == "users") && argc >= 4) {
+    if ((cmd == "inspect" || cmd == "users" || cmd == "loss_inspect") && argc >= 4) {
         if (cmd == "inspect") inspect(argv[2], argv[3]);
-        else users(argv[2], argv[3]);
+        else if (cmd == "users") users(argv[2], argv[3]);
+        else loss_inspect(argv[2], argv[3]);
         return 0;
     }
     return 1;

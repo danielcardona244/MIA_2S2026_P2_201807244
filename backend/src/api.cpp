@@ -1,6 +1,7 @@
 #include "api.h"
 #include "scanner.h"
 #include "shared.h"
+#include "filesystem.h"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -274,7 +275,10 @@ void skip_ws(const string& text, size_t& pos) {
     }
 }
 
-bool extract_commands(const string& body, string& commands, string& error) {
+bool extract_string_property(const string& body,
+                             const string& wanted_key,
+                             string& value,
+                             string& error) {
     size_t pos = 0;
     skip_ws(body, pos);
     if (pos >= body.size() || body[pos] != '{') {
@@ -298,17 +302,18 @@ bool extract_commands(const string& body, string& commands, string& error) {
         ++pos;
         skip_ws(body, pos);
 
-        if (key == "commands") {
-            if (!parse_json_string_at(body, pos, commands, error)) return false;
-            return true;
-        }
-
-        // El endpoint solo necesita strings. Para propiedades desconocidas,
-        // aceptar strings y descartarlas; otro tipo se rechaza con claridad.
-        string ignored;
-        if (!parse_json_string_at(body, pos, ignored, error)) {
-            error = "la propiedad 'commands' debe ser una cadena JSON";
+        string parsed;
+        if (!parse_json_string_at(body, pos, parsed, error)) {
+            error = "la propiedad '" + wanted_key + "' debe ser una cadena JSON";
             return false;
+        }
+        if (key == wanted_key) {
+            value = parsed;
+            if (value.empty()) {
+                error = "la propiedad '" + wanted_key + "' no puede estar vacia";
+                return false;
+            }
+            return true;
         }
 
         skip_ws(body, pos);
@@ -319,8 +324,12 @@ bool extract_commands(const string& body, string& commands, string& error) {
         if (pos < body.size() && body[pos] == '}') break;
     }
 
-    error = "falta la propiedad JSON 'commands'";
+    error = "falta la propiedad JSON '" + wanted_key + "'";
     return false;
+}
+
+bool extract_commands(const string& body, string& commands, string& error) {
+    return extract_string_property(body, "commands", commands, error);
 }
 
 string capture_command_output(const string& commands) {
@@ -411,7 +420,7 @@ void handle_client(int client) {
         send_response(client,
                       200,
                       "application/json; charset=utf-8",
-                      "{\"ok\":true,\"service\":\"ExtreamFS\",\"filesystem\":\"EXT2\"}");
+                      "{\"ok\":true,\"service\":\"ExtreamFS\",\"filesystem\":\"EXT2/EXT3\"}");
         return;
     }
 
@@ -430,6 +439,41 @@ void handle_client(int client) {
         string output = capture_command_output(commands);
         string body = "{\"ok\":true,\"output\":\"" + json_escape(output) + "\"}";
         send_response(client, 200, "application/json; charset=utf-8", body);
+        return;
+    }
+
+    if (request.path == "/api/journaling") {
+        if (request.method != "POST") {
+            send_json_error(client, 405, "metodo no permitido");
+            return;
+        }
+
+        string id;
+        if (!extract_string_property(request.body, "id", id, error)) {
+            send_json_error(client, 400, error);
+            return;
+        }
+
+        vector<JournalViewEntry> entries;
+        if (!fs_read_journal_entries(id, entries, error)) {
+            send_json_error(client, 400, error);
+            return;
+        }
+
+        ostringstream json;
+        json << "{\"ok\":true,\"id\":\"" << json_escape(id)
+             << "\",\"entries\":[";
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (i > 0) json << ',';
+            const JournalViewEntry& entry = entries[i];
+            json << "{\"count\":" << entry.count
+                 << ",\"operation\":\"" << json_escape(entry.operation)
+                 << "\",\"path\":\"" << json_escape(entry.path)
+                 << "\",\"content\":\"" << json_escape(entry.content)
+                 << "\",\"date\":\"" << json_escape(entry.date) << "\"}";
+        }
+        json << "]}";
+        send_response(client, 200, "application/json; charset=utf-8", json.str());
         return;
     }
 
@@ -477,6 +521,7 @@ int run_api_server(int port) {
     cout << "[OK] API: escuchando en http://127.0.0.1:" << port << endl;
     cout << "     GET  /api/health" << endl;
     cout << "     POST /api/execute" << endl;
+    cout << "     POST /api/journaling" << endl;
 
     while (true) {
         sockaddr_in client_address{};

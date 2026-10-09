@@ -23,6 +23,7 @@ static const map<string, set<string>> allowed_params = {
     {"unmount", {"id"}},
     {"mkfs",    {"id", "type", "fs"}},
     {"journaling", {"id"}},
+    {"loss",      {"id"}},
     {"login",   {"user", "pass", "id"}},
     {"logout",  {}},
     {"mkgrp",   {"name"}},
@@ -199,6 +200,8 @@ void process_line(const string& line) {
         cmd_mkfs(params);
     } else if (cmd == "journaling") {
         cmd_journaling(params);
+    } else if (cmd == "loss") {
+        cmd_loss(params);
     } else if (cmd == "login") {
         cmd_login(params);
     } else if (cmd == "logout") {
@@ -247,4 +250,3 @@ void process_input(const string& text) {
     string line;
     while (getline(stream, line)) process_line(line);
 }
-

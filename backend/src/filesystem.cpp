@@ -109,6 +109,31 @@ bool wipe_partition(FILE* file, const Partition& part) {
     return true;
 }
 
+bool zero_region(FILE* file, long long start, long long size) {
+    if (start < 0 || size < 0) return false;
+    char zeros[4096] = {0};
+    long long remaining = size;
+    long long pos = start;
+    while (remaining > 0) {
+        size_t chunk = static_cast<size_t>(min<long long>(remaining, sizeof(zeros)));
+        if (!write_exact(file, pos, zeros, chunk)) return false;
+        pos += static_cast<long long>(chunk);
+        remaining -= static_cast<long long>(chunk);
+    }
+    return true;
+}
+
+string bitmap_preview(FILE* file, int start, int count, int limit = 20) {
+    string out;
+    int total = min(count, limit);
+    for (int i = 0; i < total; ++i) {
+        char bit = 0;
+        if (!read_exact(file, static_cast<long long>(start) + i, &bit, 1)) return "<error>";
+        out += (bit == '1') ? '1' : '0';
+    }
+    return out;
+}
+
 void initialize_inode(Inode& inode,
                       int uid,
                       int gid,
@@ -849,10 +874,87 @@ void cmd_mkfs(map<string, string>& params) {
          << " (inodos=" << n << ", bloques=" << (3 * n) << ")" << endl;
 }
 
+bool fs_read_journal_entries(const string& id,
+                             vector<JournalViewEntry>& entries,
+                             string& error) {
+    entries.clear();
+
+    string disk_path;
+    Partition part;
+    Superblock sb;
+    if (!fs_load_context(id, disk_path, part, sb, error)) return false;
+    if (sb.s_filesystem_type != 3) {
+        error = "la particion no utiliza EXT3";
+        return false;
+    }
+
+    FILE* file = fopen(disk_path.c_str(), "rb");
+    if (!file) {
+        error = "no se pudo abrir el disco";
+        return false;
+    }
+
+    int capacity = journal_capacity(part, sb);
+    if (capacity <= 0) {
+        fclose(file);
+        error = "area de journaling invalida";
+        return false;
+    }
+
+    const long long start = journal_start(part);
+    for (int i = 0; i < capacity; ++i) {
+        Journal entry{};
+        long long pos = start + static_cast<long long>(i) * sizeof(Journal);
+        if (!read_exact(file, pos, &entry, sizeof(Journal))) {
+            fclose(file);
+            error = "no se pudo leer una entrada del journal";
+            return false;
+        }
+        if (entry.j_count <= 0) continue;
+
+        JournalViewEntry view;
+        view.count = entry.j_count;
+        view.operation = read_fixed(entry.j_content.i_operation, 10);
+        view.path = read_fixed(entry.j_content.i_path, 32);
+        view.content = read_fixed(entry.j_content.i_content, 64);
+        view.date = journal_date_text(entry.j_content.i_date);
+        entries.push_back(view);
+    }
+
+    fclose(file);
+    return true;
+}
+
 void cmd_journaling(map<string, string>& params) {
     auto it = params.find("id");
     if (it == params.end() || it->second.empty()) {
         cout << "[ERROR] JOURNALING: falta parametro -id" << endl;
+        return;
+    }
+
+    vector<JournalViewEntry> entries;
+    string error;
+    if (!fs_read_journal_entries(it->second, entries, error)) {
+        cout << "[ERROR] JOURNALING: " << error << endl;
+        return;
+    }
+
+    cout << "[OK] JOURNALING: particion " << it->second << " (EXT3)" << endl;
+    cout << "COUNT | OPERACION | PATH | CONTENIDO | FECHA" << endl;
+    for (const JournalViewEntry& entry : entries) {
+        cout << entry.count << " | "
+             << entry.operation << " | "
+             << entry.path << " | "
+             << entry.content << " | "
+             << entry.date << endl;
+    }
+    cout << "[INFO] JOURNALING: " << entries.size() << " transacciones registradas" << endl;
+}
+
+void cmd_loss(map<string, string>& params) {
+    auto it = params.find("id");
+    if (it == params.end() || it->second.empty()) {
+        cout << "[ERROR] LOSS: falta parametro -id" << endl;
         return;
     }
 
@@ -861,49 +963,85 @@ void cmd_journaling(map<string, string>& params) {
     Superblock sb;
     string error;
     if (!fs_load_context(it->second, disk_path, part, sb, error)) {
-        cout << "[ERROR] JOURNALING: " << error << endl;
+        cout << "[ERROR] LOSS: " << error << endl;
         return;
     }
     if (sb.s_filesystem_type != 3) {
-        cout << "[ERROR] JOURNALING: la particion no utiliza EXT3" << endl;
+        cout << "[ERROR] LOSS: la particion no utiliza EXT3" << endl;
         return;
     }
 
-    FILE* file = fopen(disk_path.c_str(), "rb");
+    const long long part_start = part.part_start;
+    const long long part_end = static_cast<long long>(part.part_start) + part.part_s;
+    const long long inode_bitmap_end = static_cast<long long>(sb.s_bm_inode_start) + sb.s_inodes_count;
+    const long long block_bitmap_end = static_cast<long long>(sb.s_bm_block_start) + sb.s_blocks_count;
+    const long long inode_area_end = static_cast<long long>(sb.s_inode_start) +
+                                     static_cast<long long>(sb.s_inodes_count) * sizeof(Inode);
+    const long long block_area_end = static_cast<long long>(sb.s_block_start) +
+                                     static_cast<long long>(sb.s_blocks_count) * BLOCK_SIZE;
+
+    if (sb.s_bm_inode_start < part_start + static_cast<long long>(sizeof(Superblock)) ||
+        sb.s_bm_block_start < sb.s_bm_inode_start ||
+        sb.s_inode_start < sb.s_bm_block_start ||
+        sb.s_block_start < sb.s_inode_start ||
+        inode_bitmap_end > part_end || block_bitmap_end > part_end ||
+        inode_area_end > part_end || block_area_end > part_end) {
+        cout << "[ERROR] LOSS: layout EXT3 invalido" << endl;
+        return;
+    }
+
+    FILE* file = fopen(disk_path.c_str(), "r+b");
     if (!file) {
-        cout << "[ERROR] JOURNALING: no se pudo abrir el disco" << endl;
+        cout << "[ERROR] LOSS: no se pudo abrir el disco" << endl;
         return;
     }
 
-    int capacity = journal_capacity(part, sb);
-    if (capacity <= 0) {
+    const string before_inodes = bitmap_preview(file, sb.s_bm_inode_start, sb.s_inodes_count);
+    const string before_blocks = bitmap_preview(file, sb.s_bm_block_start, sb.s_blocks_count);
+    if (before_inodes == "<error>" || before_blocks == "<error>") {
         fclose(file);
-        cout << "[ERROR] JOURNALING: area de journaling invalida" << endl;
+        cout << "[ERROR] LOSS: no se pudieron leer los bitmaps" << endl;
         return;
     }
 
-    cout << "[OK] JOURNALING: particion " << it->second << " (EXT3)" << endl;
-    cout << "COUNT | OPERACION | PATH | CONTENIDO | FECHA" << endl;
-    int shown = 0;
-    const long long start = journal_start(part);
-    for (int i = 0; i < capacity; ++i) {
-        Journal entry{};
-        long long pos = start + static_cast<long long>(i) * sizeof(Journal);
-        if (!read_exact(file, pos, &entry, sizeof(Journal))) {
-            fclose(file);
-            cout << "[ERROR] JOURNALING: no se pudo leer una entrada" << endl;
-            return;
-        }
-        if (entry.j_count <= 0) continue;
-        ++shown;
-        cout << entry.j_count << " | "
-             << read_fixed(entry.j_content.i_operation, 10) << " | "
-             << read_fixed(entry.j_content.i_path, 32) << " | "
-             << read_fixed(entry.j_content.i_content, 64) << " | "
-             << journal_date_text(entry.j_content.i_date) << endl;
+    // Registrar LOSS antes de borrar las areas de datos. El journal debe sobrevivir.
+    string journal_error;
+    if (!append_journal_entry(file, part, sb, "loss", "/", "system loss", journal_error)) {
+        fclose(file);
+        cout << "[ERROR] LOSS: " << journal_error << endl;
+        return;
     }
+
+    bool ok = true;
+    ok = ok && zero_region(file, sb.s_bm_inode_start, sb.s_inodes_count);
+    ok = ok && zero_region(file, sb.s_bm_block_start, sb.s_blocks_count);
+    ok = ok && zero_region(file, sb.s_inode_start,
+                           static_cast<long long>(sb.s_inodes_count) * sizeof(Inode));
+    ok = ok && zero_region(file, sb.s_block_start,
+                           static_cast<long long>(sb.s_blocks_count) * BLOCK_SIZE);
+    fflush(file);
+
+    if (!ok) {
+        fclose(file);
+        cout << "[ERROR] LOSS: no se pudieron limpiar todas las areas del sistema de archivos" << endl;
+        return;
+    }
+
+    const string after_inodes = bitmap_preview(file, sb.s_bm_inode_start, sb.s_inodes_count);
+    const string after_blocks = bitmap_preview(file, sb.s_bm_block_start, sb.s_blocks_count);
     fclose(file);
-    cout << "[INFO] JOURNALING: " << shown << " transacciones registradas" << endl;
+
+    if (after_inodes == "<error>" || after_blocks == "<error>") {
+        cout << "[ERROR] LOSS: no se pudieron verificar los bitmaps despues de la perdida" << endl;
+        return;
+    }
+
+    cout << "[INFO] LOSS: bitmap inodos antes:  " << before_inodes << endl;
+    cout << "[INFO] LOSS: bitmap bloques antes:  " << before_blocks << endl;
+    cout << "[INFO] LOSS: bitmap inodos despues: " << after_inodes << endl;
+    cout << "[INFO] LOSS: bitmap bloques despues: " << after_blocks << endl;
+    cout << "[OK] LOSS: perdida EXT3 simulada en " << it->second
+         << "; superbloque y journaling preservados" << endl;
 }
 
 bool fs_append_journal(const string& id,

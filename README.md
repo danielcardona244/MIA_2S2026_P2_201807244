@@ -70,6 +70,7 @@ bash backend/tests/test_p2_sprint1.sh
 bash backend/tests/test_p2_sprint2.sh
 bash backend/tests/test_p2_sprint3.sh
 bash backend/tests/test_p2_sprint4.sh
+bash backend/tests/test_p2_sprint5.sh
 bash backend/tests/test_sprint6.sh
 bash backend/tests/test_sprint5.sh
 bash backend/tests/test_sprint4.sh
@@ -141,3 +142,23 @@ Se incorporaron los comandos de copia, movimiento y búsqueda solicitados:
 - `FIND -path=<carpeta> -name=<patron>` busca recursivamente y admite `?` para un
   carácter y `*` para uno o más caracteres, respetando permisos de lectura.
 - En EXT3, `COPY`, `MOVE` y `FIND` quedan registrados en el journaling.
+
+## Proyecto 2 - Sprint 5
+
+Se agregó la simulación de pérdida de EXT3 y la visualización dedicada del journaling:
+
+- `LOSS -id=<id>` funciona únicamente sobre particiones EXT3 montadas. Antes de limpiar
+  muestra una vista previa de los bitmaps de inodos y bloques y, después de la operación,
+  confirma que ambos quedaron en cero.
+- LOSS limpia con `\0` el bitmap de inodos, bitmap de bloques, área de inodos y área de
+  bloques, preservando el superbloque y el área de journaling.
+- La operación `LOSS` se registra en el journal antes de simular la pérdida, de modo que la
+  evidencia de la transacción sobrevive al fallo.
+- Se agregó `POST /api/journaling`, que devuelve las transacciones de una partición EXT3
+  montada como JSON con operación, ruta, contenido, fecha y hora.
+- El frontend React incorpora un apartado **Journaling EXT3** que consulta ese endpoint y
+  muestra las transacciones en una tabla.
+- El frontend solicita confirmación antes de ejecutar un comando `LOSS` por tratarse de una
+  operación destructiva.
+- Los reportes `bm_inode` y `bm_block` continúan disponibles después de LOSS para evidenciar
+  los bitmaps en cero.

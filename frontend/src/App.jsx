@@ -9,6 +9,10 @@ export default function App() {
   const [output, setOutput] = useState('')
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState('Listo')
+  const [journalId, setJournalId] = useState('')
+  const [journalEntries, setJournalEntries] = useState([])
+  const [journalError, setJournalError] = useState('')
+  const [journalLoading, setJournalLoading] = useState(false)
   const fileInput = useRef(null)
 
   const loadScript = async (event) => {
@@ -38,12 +42,15 @@ export default function App() {
       return
     }
 
-    const containsFdiskDelete = commands
+    const executableLines = commands
       .split('\n')
-      .some((line) => {
-        const clean = line.trim()
-        return clean && !clean.startsWith('#') && /\bfdisk\b/i.test(clean) && /-delete\s*=/i.test(clean)
-      })
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'))
+
+    const containsFdiskDelete = executableLines.some(
+      (line) => /\bfdisk\b/i.test(line) && /-delete\s*=/i.test(line),
+    )
+    const containsLoss = executableLines.some((line) => /^loss\b/i.test(line))
 
     if (containsFdiskDelete) {
       const confirmed = window.confirm(
@@ -51,6 +58,16 @@ export default function App() {
       )
       if (!confirmed) {
         setStatus('Eliminacion cancelada por el usuario')
+        return
+      }
+    }
+
+    if (containsLoss) {
+      const confirmed = window.confirm(
+        'El script contiene LOSS. Se limpiaran bitmaps, inodos y bloques de la particion EXT3 indicada. ¿Desea continuar?',
+      )
+      if (!confirmed) {
+        setStatus('Simulacion LOSS cancelada por el usuario')
         return
       }
     }
@@ -80,6 +97,35 @@ export default function App() {
     }
   }
 
+  const loadJournal = async () => {
+    const id = journalId.trim()
+    if (!id) {
+      setJournalError('Ingrese el id de una particion EXT3 montada')
+      setJournalEntries([])
+      return
+    }
+
+    setJournalLoading(true)
+    setJournalError('')
+    try {
+      const response = await fetch('/api/journaling', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      })
+      const data = await response.json()
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || `HTTP ${response.status}`)
+      }
+      setJournalEntries(Array.isArray(data.entries) ? data.entries : [])
+    } catch (error) {
+      setJournalEntries([])
+      setJournalError(error.message)
+    } finally {
+      setJournalLoading(false)
+    }
+  }
+
   const clearAll = () => {
     setCommands('')
     setOutput('')
@@ -92,7 +138,7 @@ export default function App() {
         <div>
           <span className="eyebrow">MIA · Proyecto 2</span>
           <h1>ExtreamFS</h1>
-          <p>Interfaz web para ejecutar comandos sobre el sistema de archivos EXT2.</p>
+          <p>Interfaz web para ejecutar comandos sobre sistemas de archivos EXT2 y EXT3.</p>
         </div>
         <div className="status-pill" aria-live="polite">
           <span className={running ? 'dot busy' : 'dot'} />
@@ -169,8 +215,70 @@ export default function App() {
         />
       </section>
 
+      <section className="panel journal-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Journaling EXT3</h2>
+            <p>Visualiza las transacciones persistidas en una particion EXT3 montada.</p>
+          </div>
+          <div className="journal-controls">
+            <input
+              className="text-input compact"
+              type="text"
+              value={journalId}
+              onChange={(event) => setJournalId(event.target.value)}
+              placeholder="ID, por ejemplo 441A"
+              aria-label="ID de particion para journaling"
+            />
+            <button
+              className="button secondary"
+              type="button"
+              onClick={loadJournal}
+              disabled={journalLoading}
+            >
+              {journalLoading ? 'Cargando...' : 'Ver journaling'}
+            </button>
+          </div>
+        </div>
+
+        {journalError ? <div className="journal-error">{journalError}</div> : null}
+
+        <div className="table-wrap">
+          <table className="journal-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Operacion</th>
+                <th>Ruta</th>
+                <th>Contenido</th>
+                <th>Fecha y hora</th>
+              </tr>
+            </thead>
+            <tbody>
+              {journalEntries.length === 0 ? (
+                <tr>
+                  <td colSpan="5" className="empty-cell">
+                    No hay transacciones cargadas.
+                  </td>
+                </tr>
+              ) : (
+                journalEntries.map((entry) => (
+                  <tr key={`${entry.count}-${entry.operation}-${entry.date}`}>
+                    <td>{entry.count}</td>
+                    <td>{entry.operation}</td>
+                    <td>{entry.path}</td>
+                    <td>{entry.content}</td>
+                    <td>{entry.date}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <footer>
-        Backend C++ · EXT2 simulado en archivos .mia · Frontend React
+        Backend C++ · EXT2/EXT3 simulado en archivos .mia · Frontend React
       </footer>
     </main>
   )

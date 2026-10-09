@@ -3,6 +3,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 #include "structs.h"
 
 using namespace std;
@@ -10,6 +11,20 @@ using namespace std;
 // Comando de formateo EXT2/EXT3
 void cmd_mkfs(map<string, string>& params);
 void cmd_journaling(map<string, string>& params);
+void cmd_loss(map<string, string>& params);
+
+
+struct JournalViewEntry {
+    int count = 0;
+    string operation;
+    string path;
+    string content;
+    string date;
+};
+
+bool fs_read_journal_entries(const string& id,
+                             vector<JournalViewEntry>& entries,
+                             string& error);
 
 // Sprint 4: administracion de archivos, carpetas y permisos.
 void cmd_mkfile(map<string, string>& params);
@@ -42,4 +57,3 @@ bool fs_append_journal(const string& id,
                        string& error);
 
 #endif
-
