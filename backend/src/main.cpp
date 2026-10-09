@@ -57,7 +57,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    cout << "ExtreamFS - Sistema de archivos EXT2" << endl;
+    cout << "ExtreamFS - Sistema de archivos EXT2/EXT3" << endl;
     cout << "Ingrese comandos (exit para salir):" << endl;
     cout << endl;
 

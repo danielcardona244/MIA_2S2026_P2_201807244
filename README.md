@@ -101,3 +101,12 @@ También se incluyen versiones `.docx` editables de los documentos textuales.
 ## Nota de implementación
 
 Los montajes y la sesión se conservan en RAM mientras el proceso backend permanece activo. El ID de montaje usa el prefijo `44` correspondiente a los dos últimos dígitos del carné `201807244`.
+
+## Proyecto 2 - Sprint 2
+
+Se agregó soporte para sistemas de archivos EXT2/EXT3 mediante `mkfs -fs=2fs|3fs`.
+EXT3 reserva el área de journaling antes de los bitmaps y registra transacciones usando
+las estructuras `Journal` e `Information` definidas en el enunciado. El comando
+`journaling -id=<id>` muestra las transacciones almacenadas sin generar un reporte Graphviz.
+Los comandos de mutación existentes (MKDIR, MKFILE, MKGRP, RMGRP, MKUSR, RMUSR,
+CHGRP, CHMOD y CHOWN) escriben journal cuando la partición utiliza EXT3.

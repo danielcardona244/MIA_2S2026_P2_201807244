@@ -246,9 +246,10 @@ bool load_context(const string& id, bool require_fs, ReportContext& ctx, string&
             error = "no se pudo leer el superbloque";
             return false;
         }
-        if (ctx.sb.s_magic != 0xEF53 || ctx.sb.s_filesystem_type != 2) {
+        if (ctx.sb.s_magic != 0xEF53 ||
+            (ctx.sb.s_filesystem_type != 2 && ctx.sb.s_filesystem_type != 3)) {
             fclose(file);
-            error = "la particion no tiene un sistema de archivos EXT2 valido";
+            error = "la particion no tiene un sistema de archivos EXT2 valido (o EXT3)";
             return false;
         }
         ctx.has_fs = true;

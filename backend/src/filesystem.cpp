@@ -145,6 +145,79 @@ bool write_superblock(FILE* file, int partition_start, const Superblock& sb) {
     return write_exact(file, partition_start, &sb, sizeof(Superblock));
 }
 
+long long journal_start(const Partition& part) {
+    return static_cast<long long>(part.part_start) + sizeof(Superblock);
+}
+
+int journal_capacity(const Partition& part, const Superblock& sb) {
+    if (sb.s_filesystem_type != 3) return 0;
+    long long start = journal_start(part);
+    long long bytes = static_cast<long long>(sb.s_bm_inode_start) - start;
+    if (bytes <= 0 || bytes % static_cast<long long>(sizeof(Journal)) != 0) return 0;
+    long long count = bytes / static_cast<long long>(sizeof(Journal));
+    if (count <= 0 || count > INT_MAX) return 0;
+    return static_cast<int>(count);
+}
+
+bool append_journal_entry(FILE* file,
+                          const Partition& part,
+                          const Superblock& sb,
+                          const string& operation,
+                          const string& path,
+                          const string& content,
+                          string& error) {
+    if (sb.s_filesystem_type == 2) return true;
+    if (sb.s_filesystem_type != 3) {
+        error = "sistema de archivos no soportado para journaling";
+        return false;
+    }
+
+    int capacity = journal_capacity(part, sb);
+    if (capacity <= 0) {
+        error = "area de journaling invalida";
+        return false;
+    }
+
+    const long long start = journal_start(part);
+    for (int i = 0; i < capacity; ++i) {
+        Journal current{};
+        long long pos = start + static_cast<long long>(i) * sizeof(Journal);
+        if (!read_exact(file, pos, &current, sizeof(Journal))) {
+            error = "no se pudo leer el journal";
+            return false;
+        }
+        if (current.j_count != 0) continue;
+
+        Journal entry{};
+        entry.j_count = i + 1;
+        write_fixed(entry.j_content.i_operation, 10, operation);
+        write_fixed(entry.j_content.i_path, 32, path);
+        write_fixed(entry.j_content.i_content, 64, content);
+        entry.j_content.i_date = static_cast<float>(time(nullptr));
+        if (!write_exact(file, pos, &entry, sizeof(Journal))) {
+            error = "no se pudo escribir el journal";
+            return false;
+        }
+        return true;
+    }
+
+    error = "journal lleno";
+    return false;
+}
+
+string journal_date_text(float raw) {
+    time_t value = static_cast<time_t>(raw);
+    tm tm_value{};
+#if defined(_WIN32)
+    localtime_s(&tm_value, &value);
+#else
+    localtime_r(&value, &tm_value);
+#endif
+    char buffer[32] = {0};
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tm_value);
+    return buffer;
+}
+
 bool read_inode(FILE* file, const Superblock& sb, int index, Inode& inode) {
     if (index < 0 || index >= sb.s_inodes_count) return false;
     long long pos = static_cast<long long>(sb.s_inode_start) +
@@ -600,8 +673,9 @@ bool fs_load_context(const string& id,
         return false;
     }
 
-    if (out_superblock.s_magic != 0xEF53 || out_superblock.s_filesystem_type != 2) {
-        error = "la particion no tiene un sistema de archivos EXT2 valido";
+    if (out_superblock.s_magic != 0xEF53 ||
+        (out_superblock.s_filesystem_type != 2 && out_superblock.s_filesystem_type != 3)) {
+        error = "la particion no tiene un sistema de archivos EXT2 valido (o EXT3)";
         return false;
     }
     return true;
@@ -626,6 +700,14 @@ void cmd_mkfs(map<string, string>& params) {
         return;
     }
 
+    string fs = "2fs";
+    if (params.find("fs") != params.end()) fs = to_lower(params["fs"]);
+    if (fs != "2fs" && fs != "3fs") {
+        cout << "[ERROR] MKFS: -fs solo admite 2fs o 3fs" << endl;
+        return;
+    }
+    const bool use_ext3 = fs == "3fs";
+
     string path;
     Partition part;
     int part_index = -1;
@@ -636,6 +718,7 @@ void cmd_mkfs(map<string, string>& params) {
     }
 
     long long denominator = 1LL + 3LL + sizeof(Inode) + 3LL * BLOCK_SIZE;
+    if (use_ext3) denominator += sizeof(Journal);
     long long numerator = static_cast<long long>(part.part_s) - sizeof(Superblock);
     if (numerator <= 0) {
         cout << "[ERROR] MKFS: la particion es demasiado pequena" << endl;
@@ -650,6 +733,7 @@ void cmd_mkfs(map<string, string>& params) {
     int n = static_cast<int>(n_ll);
 
     long long bm_inode_start = static_cast<long long>(part.part_start) + sizeof(Superblock);
+    if (use_ext3) bm_inode_start += static_cast<long long>(n) * sizeof(Journal);
     long long bm_block_start = bm_inode_start + n;
     long long inode_start = bm_block_start + 3LL * n;
     long long block_start = inode_start + static_cast<long long>(n) * sizeof(Inode);
@@ -657,7 +741,7 @@ void cmd_mkfs(map<string, string>& params) {
     long long partition_end = static_cast<long long>(part.part_start) + part.part_s;
 
     if (layout_end > partition_end || block_start > INT_MAX) {
-        cout << "[ERROR] MKFS: el layout EXT2 excede la particion" << endl;
+        cout << "[ERROR] MKFS: el layout " << (use_ext3 ? "EXT3" : "EXT2") << " excede la particion" << endl;
         return;
     }
 
@@ -675,7 +759,7 @@ void cmd_mkfs(map<string, string>& params) {
 
     const time_t now = time(nullptr);
     Superblock sb{};
-    sb.s_filesystem_type = 2;
+    sb.s_filesystem_type = use_ext3 ? 3 : 2;
     sb.s_inodes_count = n;
     sb.s_blocks_count = 3 * n;
     sb.s_free_inodes_count = n - 2;
@@ -748,11 +832,100 @@ void cmd_mkfs(map<string, string>& params) {
         return;
     }
 
+    if (use_ext3) {
+        string journal_error;
+        if (!append_journal_entry(file, part, sb, "mkfs", "/", "3fs", journal_error)) {
+            fclose(file);
+            cout << "[ERROR] MKFS: " << journal_error << endl;
+            return;
+        }
+    }
+
     fflush(file);
     fclose(file);
 
-    cout << "[OK] MKFS: particion " << id << " formateada como EXT2"
+    cout << "[OK] MKFS: particion " << id << " formateada como "
+         << (use_ext3 ? "EXT3" : "EXT2")
          << " (inodos=" << n << ", bloques=" << (3 * n) << ")" << endl;
+}
+
+void cmd_journaling(map<string, string>& params) {
+    auto it = params.find("id");
+    if (it == params.end() || it->second.empty()) {
+        cout << "[ERROR] JOURNALING: falta parametro -id" << endl;
+        return;
+    }
+
+    string disk_path;
+    Partition part;
+    Superblock sb;
+    string error;
+    if (!fs_load_context(it->second, disk_path, part, sb, error)) {
+        cout << "[ERROR] JOURNALING: " << error << endl;
+        return;
+    }
+    if (sb.s_filesystem_type != 3) {
+        cout << "[ERROR] JOURNALING: la particion no utiliza EXT3" << endl;
+        return;
+    }
+
+    FILE* file = fopen(disk_path.c_str(), "rb");
+    if (!file) {
+        cout << "[ERROR] JOURNALING: no se pudo abrir el disco" << endl;
+        return;
+    }
+
+    int capacity = journal_capacity(part, sb);
+    if (capacity <= 0) {
+        fclose(file);
+        cout << "[ERROR] JOURNALING: area de journaling invalida" << endl;
+        return;
+    }
+
+    cout << "[OK] JOURNALING: particion " << it->second << " (EXT3)" << endl;
+    cout << "COUNT | OPERACION | PATH | CONTENIDO | FECHA" << endl;
+    int shown = 0;
+    const long long start = journal_start(part);
+    for (int i = 0; i < capacity; ++i) {
+        Journal entry{};
+        long long pos = start + static_cast<long long>(i) * sizeof(Journal);
+        if (!read_exact(file, pos, &entry, sizeof(Journal))) {
+            fclose(file);
+            cout << "[ERROR] JOURNALING: no se pudo leer una entrada" << endl;
+            return;
+        }
+        if (entry.j_count <= 0) continue;
+        ++shown;
+        cout << entry.j_count << " | "
+             << read_fixed(entry.j_content.i_operation, 10) << " | "
+             << read_fixed(entry.j_content.i_path, 32) << " | "
+             << read_fixed(entry.j_content.i_content, 64) << " | "
+             << journal_date_text(entry.j_content.i_date) << endl;
+    }
+    fclose(file);
+    cout << "[INFO] JOURNALING: " << shown << " transacciones registradas" << endl;
+}
+
+bool fs_append_journal(const string& id,
+                       const string& operation,
+                       const string& path,
+                       const string& content,
+                       string& error) {
+    string disk_path;
+    Partition part;
+    Superblock sb;
+    if (!fs_load_context(id, disk_path, part, sb, error)) return false;
+    if (sb.s_filesystem_type == 2) return true;
+
+    FILE* file = fopen(disk_path.c_str(), "r+b");
+    if (!file) {
+        error = "no se pudo abrir el disco para journaling";
+        return false;
+    }
+    bool ok = append_journal_entry(file, part, sb, operation, path, content, error);
+    fflush(file);
+    fclose(file);
+    return ok;
 }
 
 bool fs_read_users_file(const string& id, string& content, string& error) {
@@ -1408,6 +1581,9 @@ void cmd_mkdir(map<string, string>& params) {
         return;
     }
     cout << "[OK] MKDIR: carpeta creada " << it->second << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "mkdir", it->second, "", journal_error))
+        cout << "[WARN] MKDIR: " << journal_error << endl;
 }
 
 void cmd_mkfile(map<string, string>& params) {
@@ -1485,6 +1661,9 @@ void cmd_mkfile(map<string, string>& params) {
         cout << "[INFO] MKFILE: el archivo ya existia; se sobreescribio su contenido" << endl;
     }
     cout << "[OK] MKFILE: archivo " << pit->second << " creado (" << content.size() << " bytes)" << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "mkfile", pit->second, content, journal_error))
+        cout << "[WARN] MKFILE: " << journal_error << endl;
 }
 
 void cmd_cat(map<string, string>& params) {
@@ -1639,6 +1818,9 @@ void cmd_chmod(map<string, string>& params) {
     }
     cout << "[OK] CHMOD: permisos " << uit->second << " aplicados a " << pit->second
          << (recursive ? " recursivamente" : "") << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "chmod", pit->second, uit->second, journal_error))
+        cout << "[WARN] CHMOD: " << journal_error << endl;
 }
 
 void cmd_chown(map<string, string>& params) {
@@ -1713,4 +1895,7 @@ void cmd_chown(map<string, string>& params) {
     }
     cout << "[OK] CHOWN: propietario de " << pit->second << " cambiado a " << uit->second
          << (recursive ? " recursivamente" : "") << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "chown", pit->second, uit->second, journal_error))
+        cout << "[WARN] CHOWN: " << journal_error << endl;
 }

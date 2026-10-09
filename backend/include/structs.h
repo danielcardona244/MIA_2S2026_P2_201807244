@@ -53,6 +53,20 @@ typedef struct {
     int s_block_start = 0;
 } Superblock;
 
+// Proyecto 2: contenido de una transaccion del journal EXT3.
+// Se conservan exactamente los campos/tipos indicados por el enunciado.
+typedef struct {
+    char i_operation[10] = {0};
+    char i_path[32] = {0};
+    char i_content[64] = {0};
+    float i_date = 0.0f;
+} Information;
+
+typedef struct {
+    int j_count = 0;
+    Information j_content{};
+} Journal;
+
 typedef struct {
     int i_uid = 0;
     int i_gid = 0;

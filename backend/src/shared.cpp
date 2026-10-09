@@ -81,3 +81,4 @@ void set_api_execution(bool active) {
 bool is_api_execution() {
     return g_api_execution;
 }
+

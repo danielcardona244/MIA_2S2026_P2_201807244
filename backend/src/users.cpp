@@ -243,6 +243,9 @@ void cmd_mkgrp(map<string, string>& params) {
         return;
     }
     cout << "[OK] MKGRP: grupo " << name << " creado con id=" << id << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "mkgrp", "/users.txt", name, journal_error))
+        cout << "[WARN] MKGRP: " << journal_error << endl;
 }
 
 void cmd_rmgrp(map<string, string>& params) {
@@ -278,6 +281,9 @@ void cmd_rmgrp(map<string, string>& params) {
         return;
     }
     cout << "[OK] RMGRP: grupo " << name << " eliminado" << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "rmgrp", "/users.txt", name, journal_error))
+        cout << "[WARN] RMGRP: " << journal_error << endl;
 }
 
 void cmd_mkusr(map<string, string>& params) {
@@ -325,6 +331,10 @@ void cmd_mkusr(map<string, string>& params) {
         return;
     }
     cout << "[OK] MKUSR: usuario " << user << " creado con id=" << id << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "mkusr", "/users.txt",
+                           "user=" + user + ",grp=" + grp, journal_error))
+        cout << "[WARN] MKUSR: " << journal_error << endl;
 }
 
 void cmd_rmusr(map<string, string>& params) {
@@ -360,6 +370,9 @@ void cmd_rmusr(map<string, string>& params) {
         return;
     }
     cout << "[OK] RMUSR: usuario " << user << " eliminado" << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "rmusr", "/users.txt", user, journal_error))
+        cout << "[WARN] RMUSR: " << journal_error << endl;
 }
 
 void cmd_chgrp(map<string, string>& params) {
@@ -401,4 +414,8 @@ void cmd_chgrp(map<string, string>& params) {
         return;
     }
     cout << "[OK] CHGRP: usuario " << user << " movido al grupo " << grp << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "chgrp", "/users.txt",
+                           "user=" + user + ",grp=" + grp, journal_error))
+        cout << "[WARN] CHGRP: " << journal_error << endl;
 }

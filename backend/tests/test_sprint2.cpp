@@ -182,6 +182,7 @@ int main(int argc, char** argv) {
         cout << "SB=" << sizeof(Superblock) << '\n';
         cout << "INODE=" << sizeof(Inode) << '\n';
         cout << "BLOCK=" << sizeof(FileBlock) << '\n';
+        cout << "JOURNAL=" << sizeof(Journal) << '\n';
         return 0;
     }
     if ((cmd == "inspect" || cmd == "users") && argc >= 4) {
