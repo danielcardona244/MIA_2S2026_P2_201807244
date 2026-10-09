@@ -1795,6 +1795,277 @@ bool valid_rename_name(const string& name, string& error) {
     return true;
 }
 
+
+
+bool is_component_prefix(const vector<string>& prefix, const vector<string>& full) {
+    if (prefix.size() > full.size()) return false;
+    for (size_t i = 0; i < prefix.size(); ++i) {
+        if (prefix[i] != full[i]) return false;
+    }
+    return true;
+}
+
+bool update_parent_reference(FILE* file,
+                             const Superblock& sb,
+                             const Inode& directory,
+                             int new_parent_index,
+                             string& error) {
+    if (directory.i_type != '0') return true;
+
+    vector<int> blocks;
+    if (!inode_data_blocks(file, sb, directory, blocks, error)) return false;
+    for (int block_index : blocks) {
+        FolderBlock folder{};
+        if (!read_folder_block(file, sb, block_index, folder)) {
+            error = "no se pudo leer un bloque de la carpeta movida";
+            return false;
+        }
+        for (Content& entry : folder.b_content) {
+            if (entry.b_inodo < 0) continue;
+            if (read_fixed(entry.b_name, 12) == "..") {
+                entry.b_inodo = new_parent_index;
+                if (!write_folder_block(file, sb, block_index, folder)) {
+                    error = "no se pudo actualizar la referencia .. de la carpeta movida";
+                    return false;
+                }
+                return true;
+            }
+        }
+    }
+
+    error = "la carpeta movida no contiene referencia ..";
+    return false;
+}
+
+struct CopyStats {
+    int copied = 0;
+    int skipped = 0;
+};
+
+bool copy_inode_recursive(FILE* file,
+                          int partition_start,
+                          Superblock& sb,
+                          int source_index,
+                          int destination_parent_index,
+                          Inode& destination_parent,
+                          const string& target_name,
+                          CopyStats& stats,
+                          string& error,
+                          set<int>& visiting) {
+    if (visiting.count(source_index)) {
+        error = "se detecto una referencia ciclica inesperada durante COPY";
+        return false;
+    }
+
+    Inode source{};
+    if (!read_inode(file, sb, source_index, source)) {
+        error = "no se pudo leer un inodo de origen";
+        return false;
+    }
+
+    if (!has_permission(source, 4)) {
+        stats.skipped++;
+        return true;
+    }
+
+    int duplicate = -1;
+    if (!find_child(file, sb, destination_parent, target_name, duplicate, error)) return false;
+    if (duplicate >= 0) {
+        error = "ya existe un archivo o carpeta con el nombre " + target_name + " en el destino";
+        return false;
+    }
+
+    visiting.insert(source_index);
+
+    if (source.i_type == '1') {
+        string content;
+        if (!read_inode_file(file, sb, source, content, error)) {
+            visiting.erase(source_index);
+            return false;
+        }
+
+        bool overwritten = false;
+        if (!create_or_overwrite_file(file, partition_start, sb,
+                                      destination_parent_index, destination_parent,
+                                      target_name, content, error, overwritten)) {
+            visiting.erase(source_index);
+            return false;
+        }
+
+        int copied_index = -1;
+        if (!find_child(file, sb, destination_parent, target_name, copied_index, error) || copied_index < 0) {
+            visiting.erase(source_index);
+            if (error.empty()) error = "no se pudo localizar el archivo copiado";
+            return false;
+        }
+        Inode copied{};
+        if (!read_inode(file, sb, copied_index, copied)) {
+            visiting.erase(source_index);
+            error = "no se pudo leer el inodo del archivo copiado";
+            return false;
+        }
+        memcpy(copied.i_perm, source.i_perm, sizeof(copied.i_perm));
+        if (!write_inode(file, sb, copied_index, copied)) {
+            visiting.erase(source_index);
+            error = "no se pudieron conservar los permisos del archivo copiado";
+            return false;
+        }
+        stats.copied++;
+        visiting.erase(source_index);
+        return true;
+    }
+
+    if (source.i_type != '0') {
+        visiting.erase(source_index);
+        error = "tipo de inodo de origen no soportado";
+        return false;
+    }
+
+    int new_dir_index = -1;
+    if (!create_directory_child(file, partition_start, sb,
+                                destination_parent_index, destination_parent,
+                                target_name, new_dir_index, error)) {
+        visiting.erase(source_index);
+        return false;
+    }
+    stats.copied++;
+
+    Inode new_dir{};
+    if (!read_inode(file, sb, new_dir_index, new_dir)) {
+        visiting.erase(source_index);
+        error = "no se pudo leer la carpeta copiada";
+        return false;
+    }
+
+    vector<DirectoryEntryRef> children;
+    if (!list_directory_entries(file, sb, source, children, error)) {
+        visiting.erase(source_index);
+        return false;
+    }
+
+    for (const DirectoryEntryRef& child : children) {
+        Inode child_inode{};
+        if (!read_inode(file, sb, child.inode_index, child_inode)) {
+            visiting.erase(source_index);
+            error = "no se pudo leer un elemento del origen";
+            return false;
+        }
+        if (!has_permission(child_inode, 4)) {
+            stats.skipped++;
+            continue;
+        }
+        if (!copy_inode_recursive(file, partition_start, sb,
+                                  child.inode_index,
+                                  new_dir_index, new_dir,
+                                  child.name, stats, error, visiting)) {
+            visiting.erase(source_index);
+            return false;
+        }
+    }
+
+    memcpy(new_dir.i_perm, source.i_perm, sizeof(new_dir.i_perm));
+    new_dir.i_mtime = time(nullptr);
+    if (!write_inode(file, sb, new_dir_index, new_dir)) {
+        visiting.erase(source_index);
+        error = "no se pudieron conservar los permisos de la carpeta copiada";
+        return false;
+    }
+
+    visiting.erase(source_index);
+    return true;
+}
+
+bool wildcard_match_one_or_more(const string& pattern, const string& text) {
+    const size_t m = pattern.size();
+    const size_t n = text.size();
+    vector<vector<char>> dp(m + 1, vector<char>(n + 1, 0));
+    dp[0][0] = 1;
+
+    for (size_t i = 1; i <= m; ++i) {
+        char p = pattern[i - 1];
+        if (p == '*') {
+            // '*' representa uno o mas caracteres, no la cadena vacia.
+            for (size_t j = 1; j <= n; ++j) {
+                if (dp[i - 1][j - 1] || dp[i][j - 1]) dp[i][j] = 1;
+            }
+        } else if (p == '?') {
+            for (size_t j = 1; j <= n; ++j) {
+                if (dp[i - 1][j - 1]) dp[i][j] = 1;
+            }
+        } else {
+            for (size_t j = 1; j <= n; ++j) {
+                if (p == text[j - 1] && dp[i - 1][j - 1]) dp[i][j] = 1;
+            }
+        }
+    }
+    return dp[m][n] != 0;
+}
+
+struct FindNode {
+    string name;
+    bool matched = false;
+    vector<FindNode> children;
+};
+
+bool build_find_tree(FILE* file,
+                     const Superblock& sb,
+                     int directory_index,
+                     const Inode& directory,
+                     const string& pattern,
+                     FindNode& root,
+                     int& matches,
+                     string& error,
+                     set<int>& visiting) {
+    if (visiting.count(directory_index)) {
+        error = "se detecto una referencia ciclica inesperada durante FIND";
+        return false;
+    }
+    visiting.insert(directory_index);
+
+    vector<DirectoryEntryRef> entries;
+    if (!list_directory_entries(file, sb, directory, entries, error)) {
+        visiting.erase(directory_index);
+        return false;
+    }
+
+    for (const DirectoryEntryRef& entry : entries) {
+        Inode child{};
+        if (!read_inode(file, sb, entry.inode_index, child)) {
+            visiting.erase(directory_index);
+            error = "no se pudo leer un inodo durante FIND";
+            return false;
+        }
+
+        // FIND solo considera objetos sobre los que el usuario tiene lectura.
+        if (!has_permission(child, 4)) continue;
+
+        FindNode node;
+        node.name = entry.name;
+        node.matched = wildcard_match_one_or_more(pattern, entry.name);
+        if (node.matched) matches++;
+
+        if (child.i_type == '0') {
+            if (!build_find_tree(file, sb, entry.inode_index, child,
+                                 pattern, node, matches, error, visiting)) {
+                visiting.erase(directory_index);
+                return false;
+            }
+        }
+
+        if (node.matched || !node.children.empty()) root.children.push_back(node);
+    }
+
+    visiting.erase(directory_index);
+    return true;
+}
+
+void print_find_tree(const FindNode& node, const string& indent) {
+    for (const FindNode& child : node.children) {
+        cout << indent << "|_ " << child.name << endl;
+        print_find_tree(child, indent + "   ");
+    }
+}
+
 bool parse_ugo(const string& text, char out[3]) {
     if (text.size() != 3) return false;
     for (int i = 0; i < 3; ++i) {
@@ -2386,4 +2657,360 @@ void cmd_rename(map<string, string>& params) {
     string journal_error;
     if (!fs_append_journal(current_session.id, "rename", pit->second, nit->second, journal_error))
         cout << "[WARN] RENAME: " << journal_error << endl;
+}
+
+void cmd_copy(map<string, string>& params) {
+    if (!require_fs_session("COPY")) return;
+    auto pit = params.find("path");
+    auto dit = params.find("destino");
+    if (pit == params.end() || dit == params.end()) {
+        cout << "[ERROR] COPY: requiere -path y -destino" << endl;
+        return;
+    }
+
+    string error;
+    vector<string> source_parts, destination_parts;
+    if (!parse_absolute_path(pit->second, source_parts, error)) {
+        cout << "[ERROR] COPY: " << error << endl;
+        return;
+    }
+    if (!parse_absolute_path(dit->second, destination_parts, error)) {
+        cout << "[ERROR] COPY: " << error << endl;
+        return;
+    }
+    if (source_parts.empty()) {
+        cout << "[ERROR] COPY: no se puede copiar la carpeta raiz /" << endl;
+        return;
+    }
+
+    string disk_path;
+    Partition part;
+    Superblock sb;
+    if (!fs_load_context(current_session.id, disk_path, part, sb, error)) {
+        cout << "[ERROR] COPY: " << error << endl;
+        return;
+    }
+
+    FILE* file = fopen(disk_path.c_str(), "r+b");
+    if (!file) {
+        cout << "[ERROR] COPY: no se pudo abrir el disco" << endl;
+        return;
+    }
+
+    int source_index = -1;
+    Inode source{};
+    if (!resolve_inode_path(file, sb, source_parts, source_index, source, error)) {
+        fclose(file);
+        cout << "[ERROR] COPY: " << error << endl;
+        return;
+    }
+    if (!has_permission(source, 4)) {
+        fclose(file);
+        cout << "[ERROR] COPY: no tiene permiso de lectura sobre " << pit->second << endl;
+        return;
+    }
+
+    int destination_index = -1;
+    Inode destination{};
+    if (!resolve_inode_path(file, sb, destination_parts,
+                            destination_index, destination, error)) {
+        fclose(file);
+        cout << "[ERROR] COPY: el destino no existe o no es accesible: " << error << endl;
+        return;
+    }
+    if (destination.i_type != '0') {
+        fclose(file);
+        cout << "[ERROR] COPY: -destino debe ser una carpeta" << endl;
+        return;
+    }
+    if (!has_permission(destination, 2)) {
+        fclose(file);
+        cout << "[ERROR] COPY: no tiene permiso de escritura sobre la carpeta destino" << endl;
+        return;
+    }
+
+    if (source.i_type == '0' && is_component_prefix(source_parts, destination_parts)) {
+        fclose(file);
+        cout << "[ERROR] COPY: no se puede copiar una carpeta dentro de si misma" << endl;
+        return;
+    }
+
+    const string source_name = source_parts.back();
+    int duplicate = -1;
+    if (!find_child(file, sb, destination, source_name, duplicate, error)) {
+        fclose(file);
+        cout << "[ERROR] COPY: " << error << endl;
+        return;
+    }
+    if (duplicate >= 0) {
+        fclose(file);
+        cout << "[ERROR] COPY: ya existe un archivo o carpeta con el nombre "
+             << source_name << " en el destino" << endl;
+        return;
+    }
+
+    CopyStats stats;
+    set<int> visiting;
+    bool ok = copy_inode_recursive(file, part.part_start, sb,
+                                   source_index,
+                                   destination_index, destination,
+                                   source_name, stats, error, visiting);
+    fflush(file);
+    fclose(file);
+    if (!ok) {
+        cout << "[ERROR] COPY: " << error << endl;
+        return;
+    }
+
+    cout << "[OK] COPY: " << pit->second << " copiado en " << dit->second
+         << " (" << stats.copied << " elementos copiados";
+    if (stats.skipped > 0) cout << ", " << stats.skipped << " omitidos por permisos de lectura";
+    cout << ")" << endl;
+
+    string journal_error;
+    string journal_content = dit->second;
+    if (stats.skipped > 0) journal_content += " partial";
+    if (!fs_append_journal(current_session.id, "copy", pit->second,
+                           journal_content, journal_error))
+        cout << "[WARN] COPY: " << journal_error << endl;
+}
+
+void cmd_move(map<string, string>& params) {
+    if (!require_fs_session("MOVE")) return;
+    auto pit = params.find("path");
+    auto dit = params.find("destino");
+    if (pit == params.end() || dit == params.end()) {
+        cout << "[ERROR] MOVE: requiere -path y -destino" << endl;
+        return;
+    }
+
+    string error;
+    vector<string> source_parts, destination_parts;
+    if (!parse_absolute_path(pit->second, source_parts, error)) {
+        cout << "[ERROR] MOVE: " << error << endl;
+        return;
+    }
+    if (!parse_absolute_path(dit->second, destination_parts, error)) {
+        cout << "[ERROR] MOVE: " << error << endl;
+        return;
+    }
+    if (source_parts.empty()) {
+        cout << "[ERROR] MOVE: no se puede mover la carpeta raiz /" << endl;
+        return;
+    }
+
+    string disk_path;
+    Partition part;
+    Superblock sb;
+    if (!fs_load_context(current_session.id, disk_path, part, sb, error)) {
+        cout << "[ERROR] MOVE: " << error << endl;
+        return;
+    }
+
+    FILE* file = fopen(disk_path.c_str(), "r+b");
+    if (!file) {
+        cout << "[ERROR] MOVE: no se pudo abrir el disco" << endl;
+        return;
+    }
+
+    const string source_name = source_parts.back();
+    vector<string> source_parent_parts = source_parts;
+    source_parent_parts.pop_back();
+
+    int source_parent_index = -1;
+    Inode source_parent{};
+    if (!ensure_parent_directory(file, part.part_start, sb, source_parent_parts, false,
+                                 source_parent_index, source_parent, error)) {
+        fclose(file);
+        cout << "[ERROR] MOVE: " << error << endl;
+        return;
+    }
+
+    int source_index = -1;
+    if (!find_child(file, sb, source_parent, source_name, source_index, error)) {
+        fclose(file);
+        cout << "[ERROR] MOVE: " << error << endl;
+        return;
+    }
+    if (source_index < 0) {
+        fclose(file);
+        cout << "[ERROR] MOVE: no existe el archivo o carpeta indicado" << endl;
+        return;
+    }
+
+    Inode source{};
+    if (!read_inode(file, sb, source_index, source)) {
+        fclose(file);
+        cout << "[ERROR] MOVE: no se pudo leer el inodo de origen" << endl;
+        return;
+    }
+    if (!has_permission(source, 2)) {
+        fclose(file);
+        cout << "[ERROR] MOVE: no tiene permiso de escritura sobre " << pit->second << endl;
+        return;
+    }
+
+    int destination_index = -1;
+    Inode destination{};
+    if (!resolve_inode_path(file, sb, destination_parts,
+                            destination_index, destination, error)) {
+        fclose(file);
+        cout << "[ERROR] MOVE: el destino no existe o no es accesible: " << error << endl;
+        return;
+    }
+    if (destination.i_type != '0') {
+        fclose(file);
+        cout << "[ERROR] MOVE: -destino debe ser una carpeta" << endl;
+        return;
+    }
+    if (!has_permission(destination, 2)) {
+        fclose(file);
+        cout << "[ERROR] MOVE: no tiene permiso de escritura sobre la carpeta destino" << endl;
+        return;
+    }
+
+    if (source.i_type == '0' && is_component_prefix(source_parts, destination_parts)) {
+        fclose(file);
+        cout << "[ERROR] MOVE: no se puede mover una carpeta dentro de si misma" << endl;
+        return;
+    }
+
+    int duplicate = -1;
+    if (!find_child(file, sb, destination, source_name, duplicate, error)) {
+        fclose(file);
+        cout << "[ERROR] MOVE: " << error << endl;
+        return;
+    }
+    if (duplicate >= 0) {
+        fclose(file);
+        cout << "[ERROR] MOVE: ya existe un archivo o carpeta con el nombre "
+             << source_name << " en el destino" << endl;
+        return;
+    }
+
+    // Primero agregar la nueva referencia. Si quitar la referencia anterior fallara,
+    // se intenta revertir la insercion para no dejar dos padres permanentes.
+    if (!append_directory_entry(file, part.part_start, sb,
+                                destination_index, destination,
+                                source_name, source_index, error)) {
+        fclose(file);
+        cout << "[ERROR] MOVE: " << error << endl;
+        return;
+    }
+
+    if (!clear_directory_entry(file, sb, source_parent_index, source_parent,
+                               source_name, source_index, error)) {
+        string rollback_error;
+        clear_directory_entry(file, sb, destination_index, destination,
+                              source_name, source_index, rollback_error);
+        fflush(file);
+        fclose(file);
+        cout << "[ERROR] MOVE: " << error << endl;
+        return;
+    }
+
+    if (source.i_type == '0') {
+        if (!update_parent_reference(file, sb, source, destination_index, error)) {
+            fflush(file);
+            fclose(file);
+            cout << "[ERROR] MOVE: " << error << endl;
+            return;
+        }
+    }
+
+    source.i_mtime = time(nullptr);
+    if (!write_inode(file, sb, source_index, source)) {
+        fclose(file);
+        cout << "[ERROR] MOVE: no se pudo actualizar el inodo movido" << endl;
+        return;
+    }
+
+    fflush(file);
+    fclose(file);
+
+    cout << "[OK] MOVE: " << pit->second << " movido a " << dit->second << endl;
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "move", pit->second,
+                           dit->second, journal_error))
+        cout << "[WARN] MOVE: " << journal_error << endl;
+}
+
+void cmd_find(map<string, string>& params) {
+    if (!require_fs_session("FIND")) return;
+    auto pit = params.find("path");
+    auto nit = params.find("name");
+    if (pit == params.end() || nit == params.end()) {
+        cout << "[ERROR] FIND: requiere -path y -name" << endl;
+        return;
+    }
+    if (nit->second.empty()) {
+        cout << "[ERROR] FIND: -name no puede estar vacio" << endl;
+        return;
+    }
+
+    string error;
+    vector<string> parts;
+    if (!parse_absolute_path(pit->second, parts, error)) {
+        cout << "[ERROR] FIND: " << error << endl;
+        return;
+    }
+
+    string disk_path;
+    Partition part;
+    Superblock sb;
+    if (!fs_load_context(current_session.id, disk_path, part, sb, error)) {
+        cout << "[ERROR] FIND: " << error << endl;
+        return;
+    }
+
+    FILE* file = fopen(disk_path.c_str(), "rb");
+    if (!file) {
+        cout << "[ERROR] FIND: no se pudo abrir el disco" << endl;
+        return;
+    }
+
+    int start_index = -1;
+    Inode start{};
+    if (!resolve_inode_path(file, sb, parts, start_index, start, error)) {
+        fclose(file);
+        cout << "[ERROR] FIND: " << error << endl;
+        return;
+    }
+    if (start.i_type != '0') {
+        fclose(file);
+        cout << "[ERROR] FIND: -path debe indicar una carpeta" << endl;
+        return;
+    }
+    if (!has_permission(start, 4)) {
+        fclose(file);
+        cout << "[ERROR] FIND: no tiene permiso de lectura sobre " << pit->second << endl;
+        return;
+    }
+
+    FindNode root;
+    root.name = pit->second;
+    int matches = 0;
+    set<int> visiting;
+    if (!build_find_tree(file, sb, start_index, start,
+                         nit->second, root, matches, error, visiting)) {
+        fclose(file);
+        cout << "[ERROR] FIND: " << error << endl;
+        return;
+    }
+    fclose(file);
+
+    if (matches == 0) {
+        cout << "[OK] FIND: sin coincidencias para " << nit->second
+             << " desde " << pit->second << endl;
+    } else {
+        cout << "[OK] FIND: " << matches << " coincidencias para " << nit->second
+             << " desde " << pit->second << endl;
+        cout << pit->second << endl;
+        print_find_tree(root, "");
+    }
+
+    string journal_error;
+    if (!fs_append_journal(current_session.id, "find", pit->second,
+                           nit->second, journal_error))
+        cout << "[WARN] FIND: " << journal_error << endl;
 }

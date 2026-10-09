@@ -69,6 +69,7 @@ rep -id=441A -path=/tmp/tree.jpg -name=tree
 bash backend/tests/test_p2_sprint1.sh
 bash backend/tests/test_p2_sprint2.sh
 bash backend/tests/test_p2_sprint3.sh
+bash backend/tests/test_p2_sprint4.sh
 bash backend/tests/test_sprint6.sh
 bash backend/tests/test_sprint5.sh
 bash backend/tests/test_sprint4.sh
@@ -126,3 +127,17 @@ Se incorporaron los comandos solicitados para administrar eliminaciones y nombre
   la carpeta padre, conserva el inodo y el contenido, valida duplicados y permisos de escritura.
 - En EXT3, ambas operaciones se registran en el journaling.
 - Se protegen la carpeta raíz, nombres inválidos y rutas inexistentes.
+
+## Proyecto 2 - Sprint 4
+
+Se incorporaron los comandos de copia, movimiento y búsqueda solicitados:
+
+- `COPY -path=<ruta> -destino=<carpeta>` copia archivos o carpetas recursivamente.
+  Requiere lectura en el origen y escritura en el destino; los hijos sin permiso de
+  lectura se omiten sin impedir la copia de los demás elementos.
+- `MOVE -path=<ruta> -destino=<carpeta>` mueve archivos o carpetas dentro de la
+  partición cambiando referencias de directorio, sin duplicar inodos ni bloques.
+  Valida escritura sobre el objeto origen y la carpeta destino, duplicados y ciclos.
+- `FIND -path=<carpeta> -name=<patron>` busca recursivamente y admite `?` para un
+  carácter y `*` para uno o más caracteres, respetando permisos de lectura.
+- En EXT3, `COPY`, `MOVE` y `FIND` quedan registrados en el journaling.

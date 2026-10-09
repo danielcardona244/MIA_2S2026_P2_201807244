@@ -36,6 +36,9 @@ static const map<string, set<string>> allowed_params = {
     {"chown",   {"path", "user", "r"}},
     {"remove",  {"path"}},
     {"rename",  {"path", "name"}},
+    {"copy",    {"path", "destino"}},
+    {"move",    {"path", "destino"}},
+    {"find",    {"path", "name"}},
     {"rep",     {"name", "path", "id", "path_file_ls"}},
 };
 
@@ -224,6 +227,12 @@ void process_line(const string& line) {
         cmd_remove(params);
     } else if (cmd == "rename") {
         cmd_rename(params);
+    } else if (cmd == "copy") {
+        cmd_copy(params);
+    } else if (cmd == "move") {
+        cmd_move(params);
+    } else if (cmd == "find") {
+        cmd_find(params);
     } else if (cmd == "rep") {
         cmd_rep(params);
     } else if (cmd == "exit") {
