@@ -2215,6 +2215,184 @@ bool parse_ugo(const string& text, char out[3]) {
 
 } // namespace
 
+namespace {
+
+string view_time_text(time_t value) {
+    if (value <= 0) return "";
+    tm tm_value{};
+#ifdef _WIN32
+    localtime_s(&tm_value, &value);
+#else
+    localtime_r(&value, &tm_value);
+#endif
+    char buffer[32] = {0};
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tm_value);
+    return buffer;
+}
+
+string inode_permissions_text(const Inode& inode) {
+    string out;
+    out.push_back(inode.i_perm[0]);
+    out.push_back(inode.i_perm[1]);
+    out.push_back(inode.i_perm[2]);
+    return out;
+}
+
+string child_view_path(const string& parent, const string& name) {
+    if (parent == "/") return "/" + name;
+    return parent + "/" + name;
+}
+
+bool require_view_session(const string& id, string& error) {
+    if (!current_session.active) {
+        error = "debe iniciar sesion para usar el visualizador";
+        return false;
+    }
+    if (!compare_ci(current_session.id, id)) {
+        error = "la particion no corresponde a la sesion activa";
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool fs_list_directory_view(const string& id,
+                            const string& internal_path,
+                            vector<FsViewEntry>& entries,
+                            string& error) {
+    entries.clear();
+    if (!require_view_session(id, error)) return false;
+
+    string disk_path;
+    Partition part;
+    Superblock sb;
+    if (!fs_load_context(id, disk_path, part, sb, error)) return false;
+
+    vector<string> parts;
+    if (!parse_absolute_path(internal_path, parts, error)) return false;
+
+    FILE* file = fopen(disk_path.c_str(), "rb");
+    if (!file) {
+        error = "no se pudo abrir el disco";
+        return false;
+    }
+
+    int directory_index = -1;
+    Inode directory{};
+    if (!resolve_inode_path(file, sb, parts, directory_index, directory, error)) {
+        fclose(file);
+        return false;
+    }
+    if (directory.i_type != '0') {
+        fclose(file);
+        error = "la ruta solicitada no es una carpeta";
+        return false;
+    }
+    if (!has_permission(directory, 4)) {
+        fclose(file);
+        error = "no tiene permiso de lectura sobre la carpeta";
+        return false;
+    }
+
+    vector<DirectoryEntryRef> refs;
+    if (!list_directory_entries(file, sb, directory, refs, error)) {
+        fclose(file);
+        return false;
+    }
+
+    for (const DirectoryEntryRef& ref : refs) {
+        Inode inode{};
+        if (!read_inode(file, sb, ref.inode_index, inode)) {
+            fclose(file);
+            error = "no se pudo leer un inodo del directorio";
+            return false;
+        }
+
+        FsViewEntry view;
+        view.name = ref.name;
+        view.path = child_view_path(internal_path, ref.name);
+        view.type = inode.i_type == '0' ? "folder" : "file";
+        view.inode = ref.inode_index;
+        view.size = inode.i_s;
+        view.permissions = inode_permissions_text(inode);
+        view.uid = inode.i_uid;
+        view.gid = inode.i_gid;
+        view.modified = view_time_text(inode.i_mtime);
+        view.readable = has_permission(inode, 4);
+        entries.push_back(view);
+    }
+
+    sort(entries.begin(), entries.end(), [](const FsViewEntry& a, const FsViewEntry& b) {
+        if (a.type != b.type) return a.type == "folder";
+        return to_lower(a.name) < to_lower(b.name);
+    });
+
+    fclose(file);
+    return true;
+}
+
+bool fs_read_file_view(const string& id,
+                       const string& internal_path,
+                       FsFileView& view,
+                       string& error) {
+    view = FsFileView();
+    if (!require_view_session(id, error)) return false;
+
+    string disk_path;
+    Partition part;
+    Superblock sb;
+    if (!fs_load_context(id, disk_path, part, sb, error)) return false;
+
+    vector<string> parts;
+    if (!parse_absolute_path(internal_path, parts, error) || parts.empty()) {
+        if (error.empty()) error = "la ruta debe apuntar a un archivo";
+        return false;
+    }
+
+    FILE* file = fopen(disk_path.c_str(), "rb");
+    if (!file) {
+        error = "no se pudo abrir el disco";
+        return false;
+    }
+
+    int inode_index = -1;
+    Inode inode{};
+    if (!resolve_inode_path(file, sb, parts, inode_index, inode, error)) {
+        fclose(file);
+        return false;
+    }
+    if (inode.i_type != '1') {
+        fclose(file);
+        error = "la ruta solicitada no es un archivo";
+        return false;
+    }
+    if (!has_permission(inode, 4)) {
+        fclose(file);
+        error = "no tiene permiso de lectura sobre el archivo";
+        return false;
+    }
+
+    string content;
+    if (!read_inode_file(file, sb, inode, content, error)) {
+        fclose(file);
+        return false;
+    }
+
+    view.name = parts.back();
+    view.path = internal_path;
+    view.inode = inode_index;
+    view.size = inode.i_s;
+    view.permissions = inode_permissions_text(inode);
+    view.uid = inode.i_uid;
+    view.gid = inode.i_gid;
+    view.modified = view_time_text(inode.i_mtime);
+    view.content = content;
+
+    fclose(file);
+    return true;
+}
+
 void cmd_mkdir(map<string, string>& params) {
     if (!require_fs_session("MKDIR")) return;
     auto it = params.find("path");

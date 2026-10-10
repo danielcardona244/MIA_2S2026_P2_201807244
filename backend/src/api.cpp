@@ -1,21 +1,31 @@
 #include "api.h"
+#include "disk.h"
+#include "mount.h"
 #include "scanner.h"
 #include "shared.h"
 #include "filesystem.h"
+#include "users.h"
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <netinet/in.h>
+#include <set>
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <vector>
 
 using namespace std;
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -350,6 +360,141 @@ string capture_command_output(const string& commands) {
     return captured.str();
 }
 
+string capture_action_output(const function<void()>& action) {
+    ostringstream captured;
+    streambuf* previous = cout.rdbuf(captured.rdbuf());
+    try {
+        action();
+    } catch (const exception& e) {
+        cout << "[ERROR] API: excepcion: " << e.what() << '\n';
+    } catch (...) {
+        cout << "[ERROR] API: excepcion desconocida\n";
+    }
+    cout.rdbuf(previous);
+    return captured.str();
+}
+
+string format_time_text(time_t value) {
+    if (value <= 0) return "";
+    tm tm_value{};
+#ifdef _WIN32
+    localtime_s(&tm_value, &value);
+#else
+    localtime_r(&value, &tm_value);
+#endif
+    char buffer[32] = {0};
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tm_value);
+    return buffer;
+}
+
+string disk_fit_text(char fit) {
+    switch (fit) {
+        case 'B': return "BF";
+        case 'W': return "WF";
+        default: return "FF";
+    }
+}
+
+string partition_type_text(char type) {
+    switch (type) {
+        case 'E': return "extended";
+        case 'L': return "logical";
+        default: return "primary";
+    }
+}
+
+int mounted_count_for_path(const string& path) {
+    int count = 0;
+    for (const MountEntry& entry : mounted_list) {
+        if (entry.path == path) count++;
+    }
+    return count;
+}
+
+vector<string> current_disk_paths() {
+    vector<string> paths = get_known_disks();
+    for (const MountEntry& entry : mounted_list) {
+        if (find(paths.begin(), paths.end(), entry.path) == paths.end()) {
+            paths.push_back(entry.path);
+        }
+    }
+    sort(paths.begin(), paths.end());
+    return paths;
+}
+
+string mounted_id_for_partition(const string& path, const string& name) {
+    for (const MountEntry& entry : mounted_list) {
+        if (entry.path == path && compare_ci(entry.name, name)) return entry.id;
+    }
+    return "";
+}
+
+void append_partition_json(ostringstream& json,
+                           const string& path,
+                           const string& name,
+                           const string& type,
+                           char fit,
+                           int start,
+                           int size,
+                           bool mounted,
+                           const string& id,
+                           bool& first) {
+    if (!first) json << ',';
+    first = false;
+    json << "{\"name\":\"" << json_escape(name)
+         << "\",\"type\":\"" << json_escape(type)
+         << "\",\"fit\":\"" << json_escape(disk_fit_text(fit))
+         << "\",\"start\":" << start
+         << ",\"size\":" << size
+         << ",\"mounted\":" << (mounted ? "true" : "false")
+         << ",\"id\":\"" << json_escape(id)
+         << "\",\"diskPath\":\"" << json_escape(path) << "\"}";
+}
+
+void append_logical_partitions_json(ostringstream& json,
+                                    const string& path,
+                                    const Partition& ext,
+                                    bool& first) {
+    FILE* file = fopen(path.c_str(), "rb");
+    if (!file) return;
+
+    const int ext_end = ext.part_start + ext.part_s;
+    int pos = ext.part_start;
+    set<int> visited;
+    for (int guard = 0; guard < 500; ++guard) {
+        if (pos < ext.part_start || pos + static_cast<int>(sizeof(EBR)) > ext_end) break;
+        if (visited.count(pos)) break;
+        visited.insert(pos);
+
+        EBR ebr{};
+        if (fseek(file, pos, SEEK_SET) != 0 || fread(&ebr, sizeof(EBR), 1, file) != 1) break;
+
+        if (ebr.part_s > 0) {
+            string name = read_fixed(ebr.part_name, 16);
+            string id = mounted_id_for_partition(path, name);
+            append_partition_json(json, path, name, "logical", ebr.part_fit,
+                                  ebr.part_start, ebr.part_s, !id.empty(), id, first);
+        }
+        if (ebr.part_next == -1) break;
+        pos = ebr.part_next;
+    }
+    fclose(file);
+}
+
+string session_json() {
+    ostringstream json;
+    json << "{\"ok\":true,\"active\":" << (current_session.active ? "true" : "false");
+    if (current_session.active) {
+        json << ",\"user\":\"" << json_escape(current_session.user)
+             << "\",\"group\":\"" << json_escape(current_session.group)
+             << "\",\"id\":\"" << json_escape(current_session.id)
+             << "\",\"uid\":" << current_session.uid
+             << ",\"gid\":" << current_session.gid;
+    }
+    json << '}';
+    return json.str();
+}
+
 string reason_phrase(int status) {
     switch (status) {
         case 200: return "OK";
@@ -421,6 +566,211 @@ void handle_client(int client) {
                       200,
                       "application/json; charset=utf-8",
                       "{\"ok\":true,\"service\":\"ExtreamFS\",\"filesystem\":\"EXT2/EXT3\"}");
+        return;
+    }
+
+    if (request.path == "/api/session") {
+        if (request.method != "GET") {
+            send_json_error(client, 405, "metodo no permitido");
+            return;
+        }
+        send_response(client, 200, "application/json; charset=utf-8", session_json());
+        return;
+    }
+
+    if (request.path == "/api/login") {
+        if (request.method != "POST") {
+            send_json_error(client, 405, "metodo no permitido");
+            return;
+        }
+        if (current_session.active) {
+            send_json_error(client, 400, "ya existe una sesion activa; cierre sesion antes de iniciar otra");
+            return;
+        }
+
+        string user, password, id;
+        if (!extract_string_property(request.body, "user", user, error) ||
+            !extract_string_property(request.body, "password", password, error) ||
+            !extract_string_property(request.body, "id", id, error)) {
+            send_json_error(client, 400, error);
+            return;
+        }
+
+        map<string, string> params = {{"user", user}, {"pass", password}, {"id", id}};
+        string output = capture_action_output([&]() { cmd_login(params); });
+        if (!current_session.active) {
+            send_json_error(client, 400, trim_http(output).empty() ? "no se pudo iniciar sesion" : trim_http(output));
+            return;
+        }
+
+        send_response(client, 200, "application/json; charset=utf-8", session_json());
+        return;
+    }
+
+    if (request.path == "/api/logout") {
+        if (request.method != "POST") {
+            send_json_error(client, 405, "metodo no permitido");
+            return;
+        }
+        if (!current_session.active) {
+            send_json_error(client, 400, "no hay una sesion activa");
+            return;
+        }
+        capture_action_output([]() { cmd_logout(); });
+        send_response(client, 200, "application/json; charset=utf-8", session_json());
+        return;
+    }
+
+    if (request.path == "/api/disks") {
+        if (request.method != "GET") {
+            send_json_error(client, 405, "metodo no permitido");
+            return;
+        }
+
+        vector<string> paths = current_disk_paths();
+        ostringstream json;
+        json << "{\"ok\":true,\"disks\":[";
+        bool first = true;
+        for (const string& path : paths) {
+            FILE* check = fopen(path.c_str(), "rb");
+            if (!check) continue;
+            fclose(check);
+
+            MBR mbr = read_mbr(path);
+            if (mbr.mbr_tamano <= 0) continue;
+
+            int partition_count = 0;
+            for (const Partition& part : mbr.mbr_partitions) {
+                if (part.part_s > 0 && part.part_start >= 0) partition_count++;
+            }
+
+            if (!first) json << ',';
+            first = false;
+            string filename = fs::path(path).filename().string();
+            json << "{\"name\":\"" << json_escape(filename)
+                 << "\",\"path\":\"" << json_escape(path)
+                 << "\",\"size\":" << mbr.mbr_tamano
+                 << ",\"fit\":\"" << json_escape(disk_fit_text(mbr.dsk_fit))
+                 << "\",\"created\":\"" << json_escape(format_time_text(mbr.mbr_fecha_creacion))
+                 << "\",\"signature\":" << mbr.mbr_dsk_signature
+                 << ",\"partitionCount\":" << partition_count
+                 << ",\"mountedCount\":" << mounted_count_for_path(path) << "}";
+        }
+        json << "]}";
+        send_response(client, 200, "application/json; charset=utf-8", json.str());
+        return;
+    }
+
+    if (request.path == "/api/partitions") {
+        if (request.method != "POST") {
+            send_json_error(client, 405, "metodo no permitido");
+            return;
+        }
+
+        string path;
+        if (!extract_string_property(request.body, "path", path, error)) {
+            send_json_error(client, 400, error);
+            return;
+        }
+        FILE* check = fopen(path.c_str(), "rb");
+        if (!check) {
+            send_json_error(client, 400, "el disco indicado no existe");
+            return;
+        }
+        fclose(check);
+
+        MBR mbr = read_mbr(path);
+        if (mbr.mbr_tamano <= 0) {
+            send_json_error(client, 400, "el archivo no contiene un MBR valido");
+            return;
+        }
+
+        ostringstream json;
+        json << "{\"ok\":true,\"path\":\"" << json_escape(path) << "\",\"partitions\":[";
+        bool first = true;
+        for (const Partition& part : mbr.mbr_partitions) {
+            if (part.part_s <= 0 || part.part_start < 0) continue;
+            string name = read_fixed(part.part_name, 16);
+            string id = mounted_id_for_partition(path, name);
+            append_partition_json(json, path, name, partition_type_text(part.part_type),
+                                  part.part_fit, part.part_start, part.part_s,
+                                  !id.empty(), id, first);
+            if (part.part_type == 'E') append_logical_partitions_json(json, path, part, first);
+        }
+        json << "]}";
+        send_response(client, 200, "application/json; charset=utf-8", json.str());
+        return;
+    }
+
+    if (request.path == "/api/fs/list") {
+        if (request.method != "POST") {
+            send_json_error(client, 405, "metodo no permitido");
+            return;
+        }
+        string id, path;
+        if (!extract_string_property(request.body, "id", id, error) ||
+            !extract_string_property(request.body, "path", path, error)) {
+            send_json_error(client, 400, error);
+            return;
+        }
+
+        vector<FsViewEntry> entries;
+        if (!fs_list_directory_view(id, path, entries, error)) {
+            send_json_error(client, 400, error);
+            return;
+        }
+
+        ostringstream json;
+        json << "{\"ok\":true,\"id\":\"" << json_escape(id)
+             << "\",\"path\":\"" << json_escape(path) << "\",\"entries\":[";
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (i) json << ',';
+            const FsViewEntry& entry = entries[i];
+            json << "{\"name\":\"" << json_escape(entry.name)
+                 << "\",\"path\":\"" << json_escape(entry.path)
+                 << "\",\"type\":\"" << json_escape(entry.type)
+                 << "\",\"inode\":" << entry.inode
+                 << ",\"size\":" << entry.size
+                 << ",\"permissions\":\"" << json_escape(entry.permissions)
+                 << "\",\"uid\":" << entry.uid
+                 << ",\"gid\":" << entry.gid
+                 << ",\"modified\":\"" << json_escape(entry.modified)
+                 << "\",\"readable\":" << (entry.readable ? "true" : "false") << "}";
+        }
+        json << "]}";
+        send_response(client, 200, "application/json; charset=utf-8", json.str());
+        return;
+    }
+
+    if (request.path == "/api/fs/file") {
+        if (request.method != "POST") {
+            send_json_error(client, 405, "metodo no permitido");
+            return;
+        }
+        string id, path;
+        if (!extract_string_property(request.body, "id", id, error) ||
+            !extract_string_property(request.body, "path", path, error)) {
+            send_json_error(client, 400, error);
+            return;
+        }
+
+        FsFileView view;
+        if (!fs_read_file_view(id, path, view, error)) {
+            send_json_error(client, 400, error);
+            return;
+        }
+
+        ostringstream json;
+        json << "{\"ok\":true,\"file\":{\"name\":\"" << json_escape(view.name)
+             << "\",\"path\":\"" << json_escape(view.path)
+             << "\",\"inode\":" << view.inode
+             << ",\"size\":" << view.size
+             << ",\"permissions\":\"" << json_escape(view.permissions)
+             << "\",\"uid\":" << view.uid
+             << ",\"gid\":" << view.gid
+             << ",\"modified\":\"" << json_escape(view.modified)
+             << "\",\"content\":\"" << json_escape(view.content) << "\"}}";
+        send_response(client, 200, "application/json; charset=utf-8", json.str());
         return;
     }
 
@@ -520,6 +870,13 @@ int run_api_server(int port) {
     cout << "ExtreamFS API REST" << endl;
     cout << "[OK] API: escuchando en http://127.0.0.1:" << port << endl;
     cout << "     GET  /api/health" << endl;
+    cout << "     GET  /api/session" << endl;
+    cout << "     POST /api/login" << endl;
+    cout << "     POST /api/logout" << endl;
+    cout << "     GET  /api/disks" << endl;
+    cout << "     POST /api/partitions" << endl;
+    cout << "     POST /api/fs/list" << endl;
+    cout << "     POST /api/fs/file" << endl;
     cout << "     POST /api/execute" << endl;
     cout << "     POST /api/journaling" << endl;
 

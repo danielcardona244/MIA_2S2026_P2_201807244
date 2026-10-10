@@ -99,6 +99,10 @@ void cmd_mount(map<string, string>& params) {
     string path = params["path"];
     string name = params["name"];
 
+    // Un disco existente puede haber sido creado en una ejecucion anterior del
+    // programa. Al montarlo se incorpora al registro usado por el visualizador.
+    register_disk_path(path);
+
     FILE* check = fopen(path.c_str(), "rb");
     if (check == NULL) {
         cout << "[ERROR] MOUNT: el disco no existe en " << path << endl;

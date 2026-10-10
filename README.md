@@ -71,6 +71,7 @@ bash backend/tests/test_p2_sprint2.sh
 bash backend/tests/test_p2_sprint3.sh
 bash backend/tests/test_p2_sprint4.sh
 bash backend/tests/test_p2_sprint5.sh
+bash backend/tests/test_p2_sprint6.sh
 bash backend/tests/test_sprint6.sh
 bash backend/tests/test_sprint5.sh
 bash backend/tests/test_sprint4.sh
@@ -162,3 +163,23 @@ Se agregó la simulación de pérdida de EXT3 y la visualización dedicada del j
   operación destructiva.
 - Los reportes `bm_inode` y `bm_block` continúan disponibles después de LOSS para evidenciar
   los bitmaps en cero.
+## Proyecto 2 - Sprint 6
+
+Se incorporó el flujo gráfico de autenticación y el visualizador de solo lectura solicitado:
+
+- Inicio y cierre de sesión desde React mediante `POST /api/login` y `POST /api/logout`.
+- `GET /api/session` permite conservar y consultar la sesión activa entre solicitudes.
+- `GET /api/disks` muestra los discos conocidos por la instancia con capacidad, fit, fecha,
+  cantidad de particiones y montajes activos.
+- `POST /api/partitions` lista particiones primarias, extendidas y lógicas mostrando tamaño,
+  fit, estado de montaje e ID cuando corresponde.
+- `POST /api/fs/list` navega carpetas desde `/` en modo solo lectura y devuelve nombre, tipo,
+  tamaño, permisos, UID/GID, fecha de modificación y disponibilidad de lectura.
+- `POST /api/fs/file` permite visualizar el contenido de archivos de texto respetando permisos.
+- El frontend incorpora vistas **Terminal**, **Iniciar sesión**, **Explorador** y
+  **Journaling EXT3**, además de breadcrumbs para navegar carpetas y un visor de contenido.
+- La sesión iniciada desde la GUI es la misma que utilizan los comandos ejecutados en la
+  terminal.
+- Se agregó soporte para `VITE_API_URL`, preparando el frontend para apuntar al backend de
+  EC2 cuando se realice el despliegue en AWS.
+

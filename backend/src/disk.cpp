@@ -17,6 +17,33 @@
 using namespace std;
 namespace fs = std::filesystem;
 
+namespace {
+vector<string> known_disks;
+}
+
+void register_disk_path(const string& path) {
+    if (path.empty()) return;
+    if (find(known_disks.begin(), known_disks.end(), path) == known_disks.end()) {
+        known_disks.push_back(path);
+    }
+}
+
+void unregister_disk_path(const string& path) {
+    known_disks.erase(remove(known_disks.begin(), known_disks.end(), path), known_disks.end());
+}
+
+vector<string> get_known_disks() {
+    vector<string> existing;
+    for (const string& path : known_disks) {
+        FILE* file = fopen(path.c_str(), "rb");
+        if (file == NULL) continue;
+        fclose(file);
+        existing.push_back(path);
+    }
+    known_disks = existing;
+    return known_disks;
+}
+
 // ---- utilidades de lectura/escritura del MBR ----
 
 MBR read_mbr(const string& path) {
@@ -182,6 +209,8 @@ void cmd_mkdisk(map<string, string>& params) {
     fwrite(&mbr, sizeof(MBR), 1, file);
     fclose(file);
 
+    register_disk_path(path);
+
     cout << "[OK] MKDISK: disco creado en " << path
          << " (" << total_bytes << " bytes)" << endl;
 }
@@ -212,6 +241,7 @@ void cmd_rmdisk(map<string, string>& params) {
     fclose(check);
 
     if (remove(path.c_str()) == 0) {
+        unregister_disk_path(path);
         cout << "[OK] RMDISK: disco eliminado " << path << endl;
     } else {
         cout << "[ERROR] RMDISK: no se pudo eliminar " << path << endl;

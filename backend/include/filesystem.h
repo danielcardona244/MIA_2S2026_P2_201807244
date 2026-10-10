@@ -26,6 +26,42 @@ bool fs_read_journal_entries(const string& id,
                              vector<JournalViewEntry>& entries,
                              string& error);
 
+// Datos de solo lectura usados por el explorador web del Proyecto 2.
+struct FsViewEntry {
+    string name;
+    string path;
+    string type;       // "folder" o "file"
+    int inode = -1;
+    int size = 0;
+    string permissions;
+    int uid = -1;
+    int gid = -1;
+    string modified;
+    bool readable = false;
+};
+
+struct FsFileView {
+    string name;
+    string path;
+    int inode = -1;
+    int size = 0;
+    string permissions;
+    int uid = -1;
+    int gid = -1;
+    string modified;
+    string content;
+};
+
+bool fs_list_directory_view(const string& id,
+                            const string& internal_path,
+                            vector<FsViewEntry>& entries,
+                            string& error);
+
+bool fs_read_file_view(const string& id,
+                       const string& internal_path,
+                       FsFileView& view,
+                       string& error);
+
 // Sprint 4: administracion de archivos, carpetas y permisos.
 void cmd_mkfile(map<string, string>& params);
 void cmd_mkdir(map<string, string>& params);
