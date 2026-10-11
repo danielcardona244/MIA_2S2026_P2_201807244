@@ -1,0 +1,16 @@
+[Unit]
+Description=ExtreamFS C++ REST API
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/MIA_2S2026_P2_201807244
+ExecStart=/home/ubuntu/MIA_2S2026_P2_201807244/backend/build/extreamfs --server 8080 0.0.0.0
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

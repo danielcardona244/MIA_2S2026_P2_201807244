@@ -12,7 +12,9 @@ namespace {
 void print_usage(const char* program) {
     cout << "Uso:" << endl;
     cout << "  " << program << "                 modo consola" << endl;
-    cout << "  " << program << " --server [puerto]  API REST (default 8080)" << endl;
+    cout << "  " << program << " --server [puerto] [host]  API REST" << endl;
+    cout << "      puerto default: 8080" << endl;
+    cout << "      host default: 127.0.0.1 (usar 0.0.0.0 en EC2)" << endl;
 }
 
 bool parse_port(const string& text, int& port) {
@@ -40,11 +42,12 @@ int main(int argc, char* argv[]) {
                 cerr << "[ERROR] puerto invalido: " << argv[2] << endl;
                 return 1;
             }
-            if (argc > 3) {
+            if (argc > 4) {
                 print_usage(argv[0]);
                 return 1;
             }
-            return run_api_server(port);
+            const string host = (argc >= 4) ? argv[3] : "127.0.0.1";
+            return run_api_server(port, host);
         }
 
         if (option == "--help" || option == "-h") {

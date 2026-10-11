@@ -183,3 +183,24 @@ Se incorporó el flujo gráfico de autenticación y el visualizador de solo lect
 - Se agregó soporte para `VITE_API_URL`, preparando el frontend para apuntar al backend de
   EC2 cuando se realice el despliegue en AWS.
 
+
+## Proyecto 2 - Sprint 7
+
+Se preparó el proyecto para despliegue en AWS sin cambiar el comportamiento local:
+
+- El backend acepta `extreamfs --server <puerto> <host>`; por defecto continúa usando
+  `127.0.0.1`, mientras EC2 puede escuchar en `0.0.0.0`.
+- `deploy/ec2/install_backend.sh` instala dependencias, compila el backend y crea un servicio
+  `systemd` persistente llamado `extreamfs`.
+- `frontend/.env.production.example` documenta `VITE_API_URL` para apuntar React al backend.
+- `deploy/s3/build_frontend.sh` realiza un build reproducible con la URL de EC2 y puede
+  sincronizar `frontend/dist/` con un bucket S3 existente.
+- `deploy/s3/bucket-policy.json.template` contiene una política de lectura pública para el
+  caso de Static website hosting directo.
+- `deploy/AWS_DEPLOY.md` contiene el procedimiento y la prueba integral de aceptación.
+
+Despliegue mínimo esperado:
+
+```text
+S3 Static Website (React) -> HTTP REST -> EC2:8080 (C++ ExtreamFS)
+```

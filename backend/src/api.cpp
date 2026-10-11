@@ -832,7 +832,7 @@ void handle_client(int client) {
 
 } // namespace
 
-int run_api_server(int port) {
+int run_api_server(int port, const string& bind_address) {
     if (port <= 0 || port > 65535) {
         cerr << "[ERROR] API: puerto invalido" << endl;
         return 1;
@@ -851,11 +851,16 @@ int run_api_server(int port) {
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons(static_cast<uint16_t>(port));
 
+    if (inet_pton(AF_INET, bind_address.c_str(), &address.sin_addr) != 1) {
+        cerr << "[ERROR] API: direccion IPv4 invalida: " << bind_address << endl;
+        close(server_fd);
+        return 1;
+    }
+
     if (bind(server_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
-        cerr << "[ERROR] API: no se pudo usar 127.0.0.1:" << port
+        cerr << "[ERROR] API: no se pudo usar " << bind_address << ':' << port
              << ": " << strerror(errno) << endl;
         close(server_fd);
         return 1;
@@ -868,7 +873,10 @@ int run_api_server(int port) {
     }
 
     cout << "ExtreamFS API REST" << endl;
-    cout << "[OK] API: escuchando en http://127.0.0.1:" << port << endl;
+    cout << "[OK] API: escuchando en http://" << bind_address << ':' << port << endl;
+    if (bind_address == "0.0.0.0") {
+        cout << "     modo red: accesible mediante la IP/DNS del servidor si el firewall lo permite" << endl;
+    }
     cout << "     GET  /api/health" << endl;
     cout << "     GET  /api/session" << endl;
     cout << "     POST /api/login" << endl;

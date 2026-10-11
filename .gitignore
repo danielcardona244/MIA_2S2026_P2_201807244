@@ -55,3 +55,9 @@ pnpm-debug.log*
 
 
 
+
+# =========================
+# Entorno frontend local/AWS
+# =========================
+frontend/.env.local
+frontend/.env.production.local
