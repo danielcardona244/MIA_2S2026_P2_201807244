@@ -33,7 +33,7 @@ sudo apt-get install -y build-essential cmake graphviz curl
 echo "[2/5] Compilando ExtreamFS..."
 rm -rf "$ROOT/backend/build"
 cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release
-cmake --build "$ROOT/backend/build" --parallel
+cmake --build "$ROOT/backend/build" --parallel 1
 
 mkdir -p "$ROOT/data" "$ROOT/reports"
 
