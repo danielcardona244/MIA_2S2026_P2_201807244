@@ -61,3 +61,12 @@ pnpm-debug.log*
 # =========================
 frontend/.env.local
 frontend/.env.production.local
+
+# =========================
+# Credenciales / secretos locales
+# =========================
+*.pem
+.env
+.env.*
+!*.env.example
+!frontend/.env.production.example
